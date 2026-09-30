@@ -1,0 +1,13 @@
+name: unicon/compile
+version: v1
+entrypoint: [/usr/local/bin/compile]
+batch: false
+limits: {time_ms: 60000, cpu_ms: 60000, memory_mb: 1024, pids: 128, output_mb: 64}
+limits_from: {}
+inputs:
+  source: {type: file}
+  language: {type: enum, values: [python, c, cpp, java]}
+outputs:
+  binary: {type: file, optional: true}
+  compile_log: {type: text}
+  outcome: {type: outcome}
