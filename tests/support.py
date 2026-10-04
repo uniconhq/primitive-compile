@@ -82,8 +82,7 @@ def step_inputs(work: Path, name: str, text: str, language: str) -> None:
     source.parent.mkdir(parents=True)
     source.write_text(text)
     document = {
-        "schema_version": 3,
-        "step": "compile",
+        "schema_version": 4,
         "inputs": {"source": {"file": f"in/1/{name}"}, "language": language},
     }
     (work / "inputs.json").write_text(json.dumps(document))

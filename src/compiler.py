@@ -32,7 +32,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 LANGUAGES = ("python", "c", "cpp", "java")
 LOG_LIMIT = 64 * 1024
 BINARY_LIMIT = 32 * 1024 * 1024

@@ -9,7 +9,7 @@ the `Dockerfile`; the program the image runs, `src/compiler.py`; and
 `primitive.yaml`, the declaration the forge compiler reads to type-check a
 workflow that uses the primitive. The program is one Python file with no
 dependencies. It speaks the primitive contract, `primitive.schema.json`
-version 3, published by the [runner](https://github.com/uniconhq/runner).
+version 4, published by the [runner](https://github.com/uniconhq/runner).
 
 ## What it takes and returns
 
@@ -44,8 +44,8 @@ graded by a broken step.
 | `java` | OpenJDK 21 | `javac -encoding UTF-8 -proc:none -Xlint:none -XDsuppressNotes -d classes <Name>.java`, then packs the classes into a jar |
 
 The source is compiled under its own file name when that name is plain
-(letters, digits, `.`, `_` and `-`, not starting with `-` or `.`, with the
-language's usual extension), so the log names the contestant's file.
+(letters, digits, `.`, `_` and `-`, starting with a letter or digit, with
+the language's usual extension), so the log names the contestant's file.
 Anything else is compiled as `main.c`, `main.cpp` or `main.py`.
 
 `ONLINE_JUDGE` is defined because contest code commonly checks for it to
@@ -115,9 +115,8 @@ reads half a file.
 
 ```
 Dockerfile                  the image: python:3.14-slim, gcc, g++, OpenJDK 21
-src/compiler.py             the program, installed as /usr/local/bin/compile
+src/compiler.py             the program, installed as /usr/local/bin/compile, the image's entrypoint
 primitive.yaml              the declaration, without the image line
-scripts/check_declaration.py  checks primitive.yaml against the runner's schema
 tests/                      unit tests, and image tests that run it on Docker
 ```
 
@@ -134,25 +133,27 @@ uv sync --locked
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy
-uv run python scripts/check_declaration.py path/to/primitive.schema.json
+uv run python ../runner/scripts/check_declaration.py ../runner/schemas/primitive.schema.json .
 uv run pytest
 ```
 
+The declaration check is the runner's, so it runs from a `runner` checkout
+beside this one, at the release named in `.github/workflows/ci.yaml`.
+
 `uv run pytest` runs everything: the unit tests, which need Linux because the
 program does, and the image tests (marked `image`), which build the image and
-run it under the harness's sandbox flags. Elsewhere only the image and
-declaration tests are collected. Without Docker the image tests are skipped.
-They use `PRIMITIVE_IMAGE` instead of building when it is set. The
-declaration test and the checks on every `inputs.json` and `outputs.json` the
-tests see read the schema from `PRIMITIVE_SCHEMA`, or from a `runner`
-checkout beside this one.
+run it under the harness's sandbox flags. Elsewhere only the image tests are
+collected. Without Docker the image tests are skipped. They use
+`PRIMITIVE_IMAGE` instead of building when it is set. The checks on every
+`inputs.json` and `outputs.json` the tests see read the schema from
+`PRIMITIVE_SCHEMA`, or from a `runner` checkout beside this one.
 
 To run one compile by hand:
 
 ```
 docker build -t primitive-compile:dev .
 mkdir -p work/in && echo 'print(int(input()) * 2)' > work/in/main.py
-echo '{"schema_version": 3, "step": "compile", "inputs": {"source": {"file": "in/main.py"}, "language": "python"}}' > work/inputs.json
+echo '{"schema_version": 4, "inputs": {"source": {"file": "in/main.py"}, "language": "python"}}' > work/inputs.json
 chmod -R a+rwX work
 docker run --rm --network=none --read-only --cap-drop=ALL \
   --security-opt=no-new-privileges --security-opt=seccomp=builtin \
@@ -161,13 +162,19 @@ docker run --rm --network=none --read-only --cap-drop=ALL \
 cat work/outputs.json
 ```
 
-CI runs the checks and unit tests in one job, against `primitive.schema.json`
-from the runner release named in the workflow, and builds the image and runs
-the image tests in another.
+`.github/workflows/ci.yaml` and `release.yaml` call the workflows every
+primitive shares, `primitive-ci.yaml` and `primitive-release.yaml` in the
+[runner](https://github.com/uniconhq/runner) repo, at the runner release this
+primitive is built against, and name the same release as `runner-ref`. They
+check this repo out beside the runner at that release, so the checks read
+its `primitive.schema.json` and run its `scripts/check_declaration.py`. CI
+runs the checks and unit tests in one job, and builds the image and runs the
+image tests in another. Moving to a new runner release is a change to the
+two `uses:` lines and `runner-ref` together.
 
 ## Releasing
 
-Push a tag `v1.2.3` on `main`. The release workflow refuses a tag whose
+Push a tag `v1.2.3` on `main`. The shared release workflow refuses a tag whose
 commit is not on `main`, a tag that differs from the version in
 `pyproject.toml`, and a tag that is not a release of the version
 `primitive.yaml` declares (`v1.2.3` is a release of `v1`). It runs the same
