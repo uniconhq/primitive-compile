@@ -8,10 +8,11 @@ and pids limits, one CPU, a small noexec tmpfs at /tmp and the working
 directory at /work. They are skipped when Docker is not reachable.
 
 The contract checks use `primitive.schema.json` from `PRIMITIVE_SCHEMA`, or
-from a runner checkout beside this one when it has the version 3 declaration.
+from a runner checkout beside this one when it has the version 4 declaration.
 
 The in-process tests import the program, which needs Linux, so elsewhere only
-the image and declaration tests are collected.
+the image tests are collected. The declaration is checked by the runner's
+shared primitive CI.
 """
 
 import json
@@ -75,14 +76,14 @@ def run_image(image: str) -> RunImage:
 
 @pytest.fixture(scope="session")
 def schema() -> dict[str, Any]:
-    """The runner's primitive.schema.json at contract version 3."""
+    """The runner's primitive.schema.json at contract version 4."""
     named = os.environ.get("PRIMITIVE_SCHEMA")
     path = Path(named) if named else SIBLING_SCHEMA
     if not path.is_file():
         pytest.skip("no primitive.schema.json; set PRIMITIVE_SCHEMA")
     document: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     if "declaration" not in document.get("$defs", {}):
-        pytest.skip(f"{path} is not the version 3 contract")
+        pytest.skip(f"{path} is not the version 4 contract")
     return document
 
 

@@ -86,24 +86,22 @@ def test_source_name(name: str, suffix: str, used: str) -> None:
         (None, "inputs.json is not in the working directory"),
         ("{", "inputs.json is not valid JSON"),
         ("[]", "inputs.json is not a JSON object"),
-        ({"schema_version": 2, "step": "compile", "inputs": {}}, "contract version 3"),
-        ({"schema_version": 3, "step": "compile", "batch": []}, "no inputs object"),
+        ({"schema_version": 2, "inputs": {}}, "contract version 4"),
+        ({"schema_version": 4, "batch": []}, "no inputs object"),
         (
-            {"schema_version": 3, "step": "compile", "inputs": {"language": "c"}},
+            {"schema_version": 4, "inputs": {"language": "c"}},
             "the input named source is not a file",
         ),
         (
             {
-                "schema_version": 3,
-                "step": "compile",
+                "schema_version": 4,
                 "inputs": {"source": {"file": "in/../inputs.json"}, "language": "c"},
             },
             "the input named source is outside in/",
         ),
         (
             {
-                "schema_version": 3,
-                "step": "compile",
+                "schema_version": 4,
                 "inputs": {"source": {"file": "in/nothing.c"}, "language": "c"},
             },
             "the input named source is not in the working directory",
