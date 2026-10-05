@@ -36,6 +36,10 @@ SCHEMA_VERSION = 4
 LANGUAGES = ("python", "c", "cpp", "java")
 LOG_LIMIT = 64 * 1024
 BINARY_LIMIT = 32 * 1024 * 1024
+TOO_LARGE = "the binary would be larger than 32 MB\n"
+"""What the log ends with when the binary is over `BINARY_LIMIT`: the zip
+application and the jar are written by this program, which a compiler's
+file-size limit does not hold, so their size is checked here."""
 COMPILE_SECONDS = 30
 COMPILER_ADDRESS_SPACE = 768 * 1024 * 1024
 PYTHON_LAUNCHER = "/usr/bin/env python3"
@@ -162,6 +166,8 @@ def compile_source(root: Path, source: Path, language: str) -> dict[str, object]
             tool = compile_native(source, build, binary, language)
     finally:
         shutil.rmtree(build, ignore_errors=True)
+    if tool.ok and binary.is_file() and binary.stat().st_size > BINARY_LIMIT:
+        tool = Tool(1, tool.log + TOO_LARGE)
     if tool.ok and binary.is_file():
         return {
             "binary": {"file": "out/binary"},
@@ -211,7 +217,10 @@ def compile_python(source: Path, build: Path, binary: Path) -> Tool:
     app = build / "app"
     app.mkdir()
     shutil.copyfile(source, app / "__main__.py")
-    zipapp.create_archive(app, binary, interpreter=PYTHON_LAUNCHER)
+    try:
+        zipapp.create_archive(app, binary, interpreter=PYTHON_LAUNCHER)
+    except OSError:
+        return Tool(1, tool.log + TOO_LARGE)
     return tool
 
 
@@ -262,7 +271,10 @@ def compile_java(source: Path, build: Path, binary: Path) -> Tool:
             tool.log
             + f"no class named {qualified} to run; put main in a public class\n",
         )
-    write_jar(classes, binary, qualified)
+    try:
+        write_jar(classes, binary, qualified)
+    except OSError:
+        return Tool(1, tool.log + TOO_LARGE)
     return tool
 
 

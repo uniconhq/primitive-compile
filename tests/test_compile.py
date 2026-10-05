@@ -5,9 +5,11 @@ here that start processes need Linux, and the ones that call a compiler also
 need it installed.
 """
 
+import errno
 import json
 import shutil
 import sys
+import zipapp
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -167,6 +169,25 @@ def test_python_compiles_to_a_zip_application(tmp_path: Path) -> None:
     assert binary.read_bytes().startswith(b"#!/usr/bin/env python3\n")
     with zipfile.ZipFile(binary) as archive:
         assert archive.read("__main__.py").decode() == text
+
+
+def test_a_binary_over_the_limit_is_a_compile_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The zip application is written by the primitive itself, so its size is
+    checked against the limit here.
+    """
+
+    def too_large(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EFBIG, "File too large")
+
+    monkeypatch.setattr(zipapp, "create_archive", too_large)
+    name, text = SOURCES["python"]
+    step_inputs(tmp_path, name, text, "python")
+    result = outputs(tmp_path)
+    assert result["outputs"]["outcome"] == "compile_error"
+    assert result["outputs"]["compile_log"].endswith("larger than 32 MB\n")
+    assert not (tmp_path / "out" / "binary").exists()
 
 
 def test_python_that_does_not_compile_is_a_compile_error(tmp_path: Path) -> None:

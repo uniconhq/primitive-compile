@@ -94,7 +94,10 @@ rather than the container being killed, which would be a `system_error`:
   killed;
 - 768 MB of address space for gcc, g++ and py_compile, and a 512 MB heap for
   javac, which reserves more address space than it uses;
-- 32 MB for any single file a compiler writes, the binary included.
+- 32 MB for any single file a compiler writes, and for the binary: the
+  zip application and the jar, which this program writes itself, are checked
+  against it here, and one over it is `compile_error` with the log saying
+  so.
 
 The compile log keeps the first 64 KB of what the compiler printed and ends
 with a line saying how much more was left out.
