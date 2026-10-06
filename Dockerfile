@@ -10,7 +10,7 @@
 FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
 
 LABEL org.opencontainers.image.title="primitive-compile" \
-      org.opencontainers.image.description="The Unicon compile primitive: one source file to one binary." \
+      org.opencontainers.image.description="The Unicon compile primitive: a folder of sources to one binary." \
       org.opencontainers.image.source="https://github.com/uniconhq/primitive-compile" \
       org.opencontainers.image.licenses="MIT"
 

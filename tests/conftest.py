@@ -8,7 +8,7 @@ and pids limits, one CPU, a small noexec tmpfs at /tmp and the working
 directory at /work. They are skipped when Docker is not reachable.
 
 The contract checks use `primitive.schema.json` from `PRIMITIVE_SCHEMA`, or
-from a runner checkout beside this one when it has the version 4 declaration.
+from a runner checkout beside this one when it is the version 5 contract.
 
 The in-process tests import the program, which needs Linux, so elsewhere only
 the image tests are collected. The declaration is checked by the runner's
@@ -76,14 +76,15 @@ def run_image(image: str) -> RunImage:
 
 @pytest.fixture(scope="session")
 def schema() -> dict[str, Any]:
-    """The runner's primitive.schema.json at contract version 4."""
+    """The runner's primitive.schema.json at contract version 5."""
     named = os.environ.get("PRIMITIVE_SCHEMA")
     path = Path(named) if named else SIBLING_SCHEMA
     if not path.is_file():
         pytest.skip("no primitive.schema.json; set PRIMITIVE_SCHEMA")
     document: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-    if "declaration" not in document.get("$defs", {}):
-        pytest.skip(f"{path} is not the version 4 contract")
+    inputs_file = document.get("$defs", {}).get("inputs_file", {})
+    if inputs_file.get("properties", {}).get("schema_version", {}).get("const") != 5:
+        pytest.skip(f"{path} is not the version 5 contract")
     return document
 
 
@@ -91,8 +92,9 @@ def schema() -> dict[str, Any]:
 def check(schema: dict[str, Any]) -> Check:
     """Validate a document against one part of the contract.
 
-    For `outputs_file`, every entry must also carry each output the
-    declaration names as required, and nothing it does not name.
+    For `outputs_file`, every entry must also name only outputs the
+    declaration names, and carry each one it does not mark optional when the
+    outcome is `accepted`.
     """
     registry: Registry[Any] = Registry().with_resource(
         schema["$id"], Resource.from_contents(schema)
@@ -110,6 +112,9 @@ def check(schema: dict[str, Any]) -> Check:
         else:
             entries = [document["outputs"]]
         for outputs in entries:
-            assert required <= set(outputs) <= set(declared), outputs
+            assert set(outputs) <= set(declared), outputs
+            assert "outcome" in outputs, outputs
+            if outputs["outcome"] == "accepted":
+                assert required <= set(outputs), outputs
 
     return validate
