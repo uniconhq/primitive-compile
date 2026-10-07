@@ -1,21 +1,24 @@
 #!/usr/local/bin/python3 -I
-"""The compile primitive: one source file in, one binary and a compile log out.
+"""The compile primitive: a folder of sources in, one binary and a compile log out.
 
 The harness mounts a working directory at `/work` (or the directory named by
-the first argument) holding `inputs.json` and the source under `in/`. This
-program compiles the source for the language named in the inputs and writes
-`outputs.json`, with the binary under `out/` when the compile succeeded.
+the first argument) holding `inputs.json` and the source folder under `in/`.
+This program compiles the folder for the language named in the inputs,
+starting from the entry file, and writes `outputs.json`, with the binary under
+`out/` when the compile succeeded.
 
 A source that does not compile is an ordinary result: the outcome is
-`compile_error` and the compile log says why. `error` in `outputs.json` is kept
-for the cases where the primitive could not work at all, such as a missing
-input.
+`compile_error` and the compile log says why. So is anything else the
+contestant's folder causes, such as naming an entry that is not there or
+making a compiler run out of time. `error` in `outputs.json` is kept for the
+cases where the primitive could not work at all, such as a missing input.
 
 The binary is one file the sandbox-run primitive runs: a statically linked
 executable for C and C++, a Python zip application for Python and a runnable
 jar for Java (see the README).
 """
 
+import errno
 import json
 import os
 import re
@@ -27,13 +30,31 @@ import subprocess
 import sys
 import tempfile
 import time
-import zipapp
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import FrameType
 
-SCHEMA_VERSION = 4
-LANGUAGES = ("python", "c", "cpp", "java")
+SCHEMA_VERSION = 5
+LANGUAGES = ("c", "cpp", "java", "python")
+LANGUAGE_NAMES = {"c": "C", "cpp": "C++", "java": "Java", "python": "Python"}
+EXTENSIONS = {
+    "c": (".c",),
+    "cpp": (".cpp", ".cc", ".cxx"),
+    "java": (".java",),
+    "python": (".py",),
+}
+"""The files of a folder that are compiled as the language's sources."""
+MAIN_DESCRIPTIONS = {
+    "c": ("defines main", "define main"),
+    "cpp": ("defines main", "define main"),
+    "java": ("declares static void main", "declare static void main"),
+    "python": ('checks __name__ == "__main__"', 'check __name__ == "__main__"'),
+}
+"""How the log says which files could be the entry, for one file and for many."""
+FOLDER_LIMIT = 1000
+"""The most files and folders the source folder may hold."""
+NAMES_SHOWN = 10
 LOG_LIMIT = 64 * 1024
 BINARY_LIMIT = 32 * 1024 * 1024
 TOO_LARGE = "the binary would be larger than 32 MB\n"
@@ -42,25 +63,82 @@ application and the jar are written by this program, which a compiler's
 file-size limit does not hold, so their size is checked here."""
 COMPILE_SECONDS = 30
 COMPILER_ADDRESS_SPACE = 768 * 1024 * 1024
-PYTHON_LAUNCHER = "/usr/bin/env python3"
+PYTHON_SHEBANG = b"#!/usr/bin/env python3\n"
+PYTHON_FOLDER = "source"
+"""Where a Python binary holds the source folder, beside its `__main__.py`."""
+PYTHON_LAUNCHER = """\
+import sys
+import zipimport
+from types import ModuleType
+
+entry = {entry!r}
+archive = __file__.rpartition("/")[0]
+path = archive + "/{folder}/" + entry
+folder = path.rpartition("/")[0]
+if sys.path and sys.path[0] == archive:
+    sys.path[0] = folder
+else:
+    sys.path.insert(0, folder)
+code = compile(zipimport.zipimporter(archive).get_data(path), path, "exec")
+main = ModuleType("__main__")
+main.__file__ = path
+sys.modules["__main__"] = main
+exec(code, main.__dict__)
+"""
+"""The `__main__.py` of every Python binary: it runs the entry as the main
+module, with the entry's own folder first on the import path, as `python3
+<entry>` does."""
 TOOL_PATH = "/usr/local/bin:/usr/bin:/bin"
+PREPARE_SECONDS = 10
+"""How long reading and copying the source folder may take, before any
+compiler runs."""
 SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+PLAIN_START = re.compile(r"[A-Za-z0-9_]")
 JAVA_NAME = r"[A-Za-z_$][A-Za-z0-9_$]*"
 JAVA_FILE_NAME_LIMIT = 200
 """The longest public class name the source is saved under; a longer one could
 not name a file, so javac is left to refuse it as a compile error.
 """
-JAVA_NOISE = re.compile(
-    r'"""(?:\\.|[^\\])*?"""|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''
-    r"|//[^\n]*|/\*.*?\*/",
-    re.DOTALL,
+C_LITERAL = (
+    r'"[^"\\\n]*+(?:\\.[^"\\\n]*+)*+"?'
+    r"|'[^'\\\n]*+(?:\\.[^'\\\n]*+)*+'?"
 )
+JAVA_TEXT_BLOCK = r'"""[^"\\]*+(?:(?:\\.|"(?!""))[^"\\]*+)*+(?:""")?'
+NOISE = {
+    "c": re.compile(rf"{C_LITERAL}|/", re.DOTALL),
+    "java": re.compile(rf"{JAVA_TEXT_BLOCK}|{C_LITERAL}|/", re.DOTALL),
+}
+"""A whole literal, or a `/` that may open a comment. A string or character
+literal runs to its closing quote, escapes skipped, or else to the end of its
+line; a Java text block to its closing triple quote, or else to the end of
+the text. Every part is possessive, so a literal is read once."""
 JAVA_PACKAGE = re.compile(
-    rf"^\s*package\s+({JAVA_NAME}(?:\s*\.\s*{JAVA_NAME})*)\s*;", re.M
+    rf"^[^\S\n]*package\s+({JAVA_NAME}(?:\s*\.\s*{JAVA_NAME})*)\s*;", re.M
 )
+JAVA_TYPE = r"(?:class|interface|enum|record)\s++"
 JAVA_TOP_LEVEL = re.compile(
-    r"[{}]|\b((?:(?:public|abstract|final|sealed|non-sealed|strictfp)\s+)*)"
-    rf"(?:class|interface|enum|record)\s+({JAVA_NAME})"
+    r"[{}]|(?<![A-Za-z0-9_$])(?:"
+    r"((?:(?:public|abstract|final|sealed|non-sealed|strictfp)\s++)++)"
+    rf"(?:{JAVA_TYPE}({JAVA_NAME}))?|{JAVA_TYPE}({JAVA_NAME}))"
+)
+"""A brace, a run of type modifiers with the type it declares if any, or a
+type declared without modifiers."""
+JAVA_MAIN = re.compile(
+    r"(?<![A-Za-z0-9_$])"
+    r"((?:(?:public|protected|private|static|final|synchronized|strictfp)\s++)++)"
+    r"(void\s++main\s*+\()?"
+)
+"""A run of method modifiers, with `void main(` if it follows."""
+C_MAIN_NAME = re.compile(r"(?<![\w.:>])main\s*+\(")
+C_STOP = re.compile(r"[;{}]")
+C_PARAMETERS_LIMIT = 2000
+C_AFTER_PARAMETERS_LIMIT = 200
+"""How far a C or C++ `main(` may be from the `)` that closes its parameters,
+and that `)` from the `{` of its body, for the file to count as defining main."""
+PYTHON_MAIN = re.compile(
+    r"^if\s+(?:__name__\s*==\s*(['\"])__main__\1|(['\"])__main__\2\s*==\s*__name__)"
+    r"\s*:",
+    re.M,
 )
 
 
@@ -69,6 +147,14 @@ class PrimitiveError(Exception):
 
     The message is one sentence for a person and becomes `error` in
     `outputs.json`, which the harness turns into a `system_error` verdict.
+    """
+
+
+class CompileError(Exception):
+    """The contestant's folder cannot be compiled as it is.
+
+    The message is one line of the compile log, saying why, and the outcome is
+    `compile_error`.
     """
 
 
@@ -88,6 +174,21 @@ class Tool:
         return self.returncode == 0
 
 
+@dataclass(frozen=True)
+class Program:
+    """The source folder as copied for compiling, by paths relative to the copy.
+
+    `files` is every file of the folder, `sources` those the compiler is given,
+    `entry` the file to start from and, for Java, `main_class` the class the
+    jar runs, with its package.
+    """
+
+    files: list[str]
+    sources: list[str]
+    entry: str
+    main_class: str | None = None
+
+
 def main(argv: list[str]) -> int:
     """Compile what `inputs.json` names and write `outputs.json`.
 
@@ -96,8 +197,8 @@ def main(argv: list[str]) -> int:
     """
     root = Path(argv[1]) if len(argv) > 1 else Path("/work")
     try:
-        source, language = read_inputs(root)
-        outputs = compile_source(root, source, language)
+        folder, language, entry = read_inputs(root)
+        outputs = compile_source(root, folder, language, entry)
         document: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "outputs": outputs,
@@ -109,8 +210,10 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-def read_inputs(root: Path) -> tuple[Path, str]:
-    """Read `inputs.json` and return the source file and the language."""
+def read_inputs(root: Path) -> tuple[Path, str, str | None]:
+    """Read `inputs.json` and return the source folder, the language and the
+    entry, None when it was not given or is empty.
+    """
     try:
         document = json.loads((root / "inputs.json").read_bytes())
     except FileNotFoundError:
@@ -126,28 +229,35 @@ def read_inputs(root: Path) -> tuple[Path, str]:
     inputs = document.get("inputs")
     if not isinstance(inputs, dict):
         raise PrimitiveError("inputs.json has no inputs object")
-    source = input_file(root, inputs, "source")
+    folder = input_folder(root, inputs, "source")
     language = inputs.get("language")
     if language not in LANGUAGES:
         raise PrimitiveError(f"the language input is not one of {', '.join(LANGUAGES)}")
-    return source, str(language)
+    entry = inputs.get("entry")
+    if entry is not None and not isinstance(entry, str):
+        raise PrimitiveError("the input named entry is not text")
+    if entry is not None:
+        entry = entry.strip() or None
+    return folder, str(language), entry
 
 
-def input_file(root: Path, inputs: dict[str, object], name: str) -> Path:
-    """Resolve a file input to a path, refusing anything outside `in/`."""
+def input_folder(root: Path, inputs: dict[str, object], name: str) -> Path:
+    """Resolve a folder input to a path, refusing anything outside `in/`."""
     value = inputs.get(name)
-    if not isinstance(value, dict) or not isinstance(value.get("file"), str):
-        raise PrimitiveError(f"the input named {name} is not a file")
-    path = (root / str(value["file"])).resolve()
+    if not isinstance(value, dict) or not isinstance(value.get("folder"), str):
+        raise PrimitiveError(f"the input named {name} is not a folder")
+    path = (root / str(value["folder"])).resolve()
     if not path.is_relative_to((root / "in").resolve()):
         raise PrimitiveError(f"the input named {name} is outside in/")
-    if not path.is_file():
+    if not path.is_dir():
         raise PrimitiveError(f"the input named {name} is not in the working directory")
     return path
 
 
-def compile_source(root: Path, source: Path, language: str) -> dict[str, object]:
-    """Compile `source` into `out/binary` and return the outputs.
+def compile_source(
+    root: Path, folder: Path, language: str, entry: str | None
+) -> dict[str, object]:
+    """Compile `folder` into `out/binary` and return the outputs.
 
     Everything the compilers write goes to a fresh directory under the
     temporary directory, removed afterwards, except the binary itself.
@@ -158,12 +268,16 @@ def compile_source(root: Path, source: Path, language: str) -> dict[str, object]
     binary.unlink(missing_ok=True)
     build = Path(tempfile.mkdtemp(prefix="compile-"))
     try:
+        source = build / "source"
+        program = prepare_in_time(folder, source, language, entry)
         if language == "python":
-            tool = compile_python(source, build, binary)
+            tool = compile_python(program, source, binary)
         elif language == "java":
-            tool = compile_java(source, build, binary)
+            tool = compile_java(program, source, build, binary)
         else:
-            tool = compile_native(source, build, binary, language)
+            tool = compile_native(program, source, binary, language)
+    except CompileError as error:
+        tool = Tool(1, f"{error}\n")
     finally:
         shutil.rmtree(build, ignore_errors=True)
     if tool.ok and binary.is_file() and binary.stat().st_size > BINARY_LIMIT:
@@ -178,10 +292,269 @@ def compile_source(root: Path, source: Path, language: str) -> dict[str, object]
     return {"compile_log": tool.log, "outcome": "compile_error"}
 
 
-def compile_native(source: Path, build: Path, binary: Path, language: str) -> Tool:
-    """Compile C or C++ with gcc into one statically linked executable."""
-    name = source_name(source, ".c" if language == "c" else ".cpp")
-    shutil.copyfile(source, build / name)
+def prepare_in_time(
+    folder: Path, source: Path, language: str, entry: str | None
+) -> Program:
+    """`prepare`, stopped as a compile error once it has run `PREPARE_SECONDS`.
+
+    Everything `prepare` does is linear in the size of the folder, so this is
+    a backstop: a folder that still takes that long ends as `compile_error`
+    with a line in the log, never as the container killed at its time limit.
+    """
+
+    def stop(signal_number: int, frame: FrameType | None) -> None:
+        raise CompileError(
+            f"reading the source folder took longer than {PREPARE_SECONDS} seconds"
+            " and was stopped"
+        )
+
+    previous = signal.signal(signal.SIGALRM, stop)
+    signal.setitimer(signal.ITIMER_REAL, PREPARE_SECONDS)
+    try:
+        return prepare(folder, source, language, entry)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def prepare(folder: Path, source: Path, language: str, entry: str | None) -> Program:
+    """Copy the source folder to `source` and work out what to compile.
+
+    A folder of one file is that file, whatever it is called, copied under the
+    name it is compiled as. A larger folder is copied with its layout, its
+    sources are its files with the language's extensions, and the entry is
+    the one named, or else the one source, or else the one source that holds
+    main (see the README). For C and C++ a source other than the entry that
+    holds main is left out; for Java the entry gives the class the jar runs.
+    """
+    files = folder_files(folder)
+    if entry is not None:
+        entry = entry_path(entry, files)
+    if len(files) == 1:
+        name, main_class = single_file(folder / files[0], language)
+        copy_file(folder / files[0], source / name)
+        return Program([name], [name], name, main_class)
+    sources = [path for path in files if path.endswith(EXTENSIONS[language])]
+    if entry is None:
+        entry = find_entry(folder, sources, language)
+    elif entry not in sources:
+        raise CompileError(
+            f"the entry {entry} is not a {LANGUAGE_NAMES[language]} source file"
+            f" ({', '.join(EXTENSIONS[language])})"
+        )
+    main_class = None
+    if language == "java":
+        main_class = java_main_class(*java_declarations(read_text(folder / entry)))
+    elif language != "python":
+        sources = [
+            path
+            for path in sources
+            if path == entry or not holds_main(folder / path, language)
+        ]
+    for path in files:
+        copy_file(folder / path, source / path)
+    return Program(files, sources, entry, main_class)
+
+
+def folder_files(folder: Path) -> list[str]:
+    """Every regular file under `folder`, as sorted paths relative to it.
+
+    Links are neither followed nor listed. A folder that is empty, holds more
+    than `FOLDER_LIMIT` entries or a name that is not UTF-8 is a compile
+    error.
+    """
+    found: list[str] = []
+    entries = 0
+    for directory, folders, names in folder.walk():
+        entries += len(folders) + len(names)
+        if entries > FOLDER_LIMIT:
+            raise CompileError(
+                f"the source folder holds more than {FOLDER_LIMIT} files and folders"
+            )
+        for name in names:
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = path.relative_to(folder).as_posix()
+            try:
+                relative.encode("utf-8")
+            except UnicodeEncodeError:
+                shown = os.fsencode(relative).decode("utf-8", errors="replace")
+                raise CompileError(
+                    f"the file name {shown} in the source folder is not UTF-8"
+                ) from None
+            found.append(relative)
+    if not found:
+        raise CompileError("the source folder holds no files")
+    return sorted(found)
+
+
+def entry_path(entry: str, files: list[str]) -> str:
+    """The entry as a path relative to the folder, refusing one that is not a
+    file in it.
+    """
+    path = PurePosixPath(entry)
+    relative = path.as_posix()
+    if path.is_absolute() or ".." in path.parts or relative not in files:
+        raise CompileError(f"the entry {entry} is not a file in the source folder")
+    return relative
+
+
+def find_entry(folder: Path, sources: list[str], language: str) -> str:
+    """The entry when none was named: the one source, or the one that holds main.
+
+    Anything else is a compile error that asks for the entry to be named.
+    """
+    name = LANGUAGE_NAMES[language]
+    if not sources:
+        raise CompileError(
+            f"the source folder holds no {name} source file"
+            f" ({', '.join(EXTENSIONS[language])})"
+        )
+    if len(sources) == 1:
+        return sources[0]
+    holders = [path for path in sources if holds_main(folder / path, language)]
+    if len(holders) == 1:
+        return holders[0]
+    one, many = MAIN_DESCRIPTIONS[language]
+    if holders:
+        shown = ", ".join(holders[:NAMES_SHOWN])
+        if len(holders) > NAMES_SHOWN:
+            shown += f" and {len(holders) - NAMES_SHOWN} more"
+        found = f"{shown} each {many}"
+    else:
+        found = f"no {name} source {one}"
+    raise CompileError(
+        f"the entry is not clear: {found}; name the file to start from as the entry"
+    )
+
+
+def holds_main(path: Path, language: str) -> bool:
+    """Whether a source file looks like a program's start.
+
+    C and C++: it defines a function `main`. Java: it declares a `static void
+    main`. Python: it has a top-level `if __name__ == "__main__":`. Comments
+    and string literals are ignored for C, C++ and Java.
+    """
+    text = read_text(path)
+    if language == "python":
+        return PYTHON_MAIN.search(text) is not None
+    if language == "java":
+        return java_holds_main(code_only(text, "java"))
+    return c_holds_main(code_only(text, "c"))
+
+
+def c_holds_main(code: str) -> bool:
+    """Whether C or C++ code, its comments and literals blanked, defines `main`.
+
+    That is `main(` not after a name, `.`, `::` or `->`, then within
+    `C_PARAMETERS_LIMIT` characters a `)` with no `;`, `{` or `}` before it,
+    then within `C_AFTER_PARAMETERS_LIMIT` characters, none of them `;`, a
+    brace or a parenthesis, the `{` of a body. Each `main(` is checked against
+    the first `;` or brace after it, found once for every `main(` before it,
+    so the code is read in one pass.
+    """
+    stop = closing = -1
+    for match in C_MAIN_NAME.finditer(code):
+        opened = match.end()
+        if stop < opened:
+            found = C_STOP.search(code, opened)
+            if found is None:
+                return False
+            stop = found.start()
+            start = max(0, stop - C_AFTER_PARAMETERS_LIMIT - 1)
+            closing = max(code.rfind("(", start, stop), code.rfind(")", start, stop))
+        if (
+            code[stop] == "{"
+            and closing >= opened
+            and code[closing] == ")"
+            and closing - opened <= C_PARAMETERS_LIMIT
+        ):
+            return True
+    return False
+
+
+def java_holds_main(code: str) -> bool:
+    """Whether Java code, its comments and literals blanked, declares a
+    `static void main(`: `void main (` after a run of method modifiers that
+    includes `static`.
+
+    Each match takes a whole run of modifiers, so no run is read twice.
+    """
+    return any(
+        match.group(2) and "static" in match.group(1).split()
+        for match in JAVA_MAIN.finditer(code)
+    )
+
+
+def code_only(text: str, language: str) -> str:
+    """The text with each comment and string or character literal replaced by
+    one space, for C and C++ (`c`) or Java (`java`).
+
+    One pass from the start, in one of a few states: code, kept up to the
+    next `/` or quote; a line comment, skipped to the end of its line; a
+    block comment, to `*/`; a string or character literal, to its closing
+    quote, escapes skipped, or else to the end of its line; and for Java a
+    text block, to its closing triple quote. A block comment or text block
+    left open runs to the end of the text. Nothing is read twice, so the time
+    is linear in the length of the text whatever it holds.
+    """
+    noise = NOISE[language]
+    kept: list[str] = []
+    position = looked = 0
+    while found := noise.search(text, looked):
+        start, end = found.span()
+        if text[start] == "/":
+            follower = text[start + 1 : start + 2]
+            if follower == "/":
+                end = text.find("\n", start + 2)
+            elif follower == "*":
+                end = text.find("*/", start + 2)
+                end = -1 if end < 0 else end + 2
+            else:
+                looked = end
+                continue
+        kept += (text[position:start], " ")
+        if end < 0:
+            return "".join(kept)
+        position = looked = end
+    kept.append(text[position:])
+    return "".join(kept)
+
+
+def single_file(path: Path, language: str) -> tuple[str, str | None]:
+    """The name the only file of a folder is compiled under, and for Java the
+    class the jar runs.
+
+    Java is named after the public top-level type, as javac requires, or
+    `Main.java` when there is none; the others keep a plain name of the
+    language's own extension and fall back to `main`.
+    """
+    if language != "java":
+        return source_name(path, EXTENSIONS[language][0]), None
+    package, types = java_declarations(read_text(path))
+    public = [name for name, is_public in types if is_public]
+    named = public[0] if public and len(public[0]) <= JAVA_FILE_NAME_LIMIT else "Main"
+    return f"{named}.java", java_main_class(package, types)
+
+
+def copy_file(origin: Path, target: Path) -> None:
+    """Copy one file of the source folder, a failure being a compile error."""
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(origin, target)
+    except OSError as error:
+        raise CompileError(
+            f"the source folder could not be copied to compile it: {error.strerror}"
+        ) from None
+
+
+def compile_native(program: Program, source: Path, binary: Path, language: str) -> Tool:
+    """Compile C or C++ with gcc into one statically linked executable.
+
+    The entry comes first, then the program's other sources.
+    """
+    others = [path for path in program.sources if path != program.entry]
     if language == "c":
         command = ["gcc", "-x", "c", "-std=gnu17"]
     else:
@@ -191,59 +564,54 @@ def compile_native(source: Path, build: Path, binary: Path, language: str) -> To
         "-pipe",
         "-static",
         "-DONLINE_JUDGE",
+        "-iquote",
+        ".",
         "-o",
         str(binary),
-        name,
+        *map(argument, [program.entry, *others]),
         "-lm",
     ]
-    return run_tool(command, build, limit_address_space=True)
+    return run_tool(command, source, limit_address_space=True)
 
 
-def compile_python(source: Path, build: Path, binary: Path) -> Tool:
-    """Check the source with py_compile and pack it as a zip application.
+def compile_python(program: Program, source: Path, binary: Path) -> Tool:
+    """Check every source with py_compile and pack the folder as a zip application.
 
-    The archive holds the source as `__main__.py` behind a shebang line, so
-    the interpreter in the sandbox-run image runs it as a script.
+    The archive holds the folder under `source/` and a `__main__.py` that runs
+    the entry, behind a shebang line, so the interpreter in the sandbox-run
+    image runs it as a script.
     """
-    name = source_name(source, ".py")
-    shutil.copyfile(source, build / name)
     tool = run_tool(
-        [sys.executable, "-I", "-m", "py_compile", name],
-        build,
+        [sys.executable, "-I", "-m", "py_compile", *map(argument, program.sources)],
+        source,
         limit_address_space=True,
     )
     if not tool.ok:
         return tool
-    app = build / "app"
-    app.mkdir()
-    shutil.copyfile(source, app / "__main__.py")
     try:
-        zipapp.create_archive(app, binary, interpreter=PYTHON_LAUNCHER)
+        write_zip_application(source, program, binary)
     except OSError:
         return Tool(1, tool.log + TOO_LARGE)
     return tool
 
 
-def compile_java(source: Path, build: Path, binary: Path) -> Tool:
+def write_zip_application(source: Path, program: Program, binary: Path) -> None:
+    """Write the folder and the launcher for its entry as a zip application."""
+    launcher = PYTHON_LAUNCHER.format(entry=program.entry, folder=PYTHON_FOLDER)
+    with binary.open("wb") as stream:
+        stream.write(PYTHON_SHEBANG)
+        with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("__main__.py", launcher)
+            for path in program.files:
+                archive.write(source / path, f"{PYTHON_FOLDER}/{path}")
+
+
+def compile_java(program: Program, source: Path, build: Path, binary: Path) -> Tool:
     """Compile Java with javac and pack the classes as a runnable jar.
 
-    The file is named after its public top-level type, as javac requires, or
-    `Main.java` when there is none. The main class is that public type, or
-    else a top-level type named `Main`, or else the first top-level type.
+    Every source is compiled, and the jar runs the program's main class.
     """
-    text = source.read_bytes().decode("utf-8", errors="replace")
-    package, types = java_declarations(text)
-    public = [name for name, is_public in types if is_public]
-    names = [name for name, _ in types]
-    if public:
-        main_class = public[0]
-    elif "Main" in names or not names:
-        main_class = "Main"
-    else:
-        main_class = names[0]
-    named = public[0] if public and len(public[0]) <= JAVA_FILE_NAME_LIMIT else "Main"
-    file_name = f"{named}.java"
-    shutil.copyfile(source, build / file_name)
+    qualified = program.main_class or "Main"
     classes = build / "classes"
     classes.mkdir()
     command = [
@@ -258,13 +626,12 @@ def compile_java(source: Path, build: Path, binary: Path) -> Tool:
         "-Xlint:none",
         "-XDsuppressNotes",
         "-d",
-        "classes",
-        file_name,
+        str(classes),
+        *map(argument, program.sources),
     ]
-    tool = run_tool(command, build, limit_address_space=False)
+    tool = run_tool(command, source, limit_address_space=False)
     if not tool.ok:
         return tool
-    qualified = f"{package}.{main_class}" if package else main_class
     if not (classes / (qualified.replace(".", "/") + ".class")).is_file():
         return Tool(
             1,
@@ -283,22 +650,39 @@ def java_declarations(text: str) -> tuple[str, list[tuple[str, bool]]]:
 
     Comments and string literals are blanked first, then braces are counted so
     that only types declared outside every other type are listed, each with
-    whether it is public.
+    whether it is public. Each match takes a whole run of modifiers, so no
+    run is read twice.
     """
-    code = JAVA_NOISE.sub(" ", text)
+    code = code_only(text, "java")
     package_match = JAVA_PACKAGE.search(code)
     package = re.sub(r"\s", "", package_match.group(1)) if package_match else ""
     types: list[tuple[str, bool]] = []
     depth = 0
     for match in JAVA_TOP_LEVEL.finditer(code):
-        token = match.group(0)
+        token = match.group()
         if token == "{":
             depth += 1
         elif token == "}":
             depth = max(0, depth - 1)
-        elif depth == 0:
-            types.append((match.group(2), "public" in match.group(1).split()))
+        elif depth == 0 and (name := match.group(2) or match.group(3)):
+            types.append((name, "public" in (match.group(1) or "").split()))
     return package, types
+
+
+def java_main_class(package: str, types: list[tuple[str, bool]]) -> str:
+    """The class the jar runs, with its package: the entry's public top-level
+    type, or else its top-level type named `Main`, or else its first top-level
+    type.
+    """
+    public = [name for name, is_public in types if is_public]
+    names = [name for name, _ in types]
+    if public:
+        main_class = public[0]
+    elif "Main" in names or not names:
+        main_class = "Main"
+    else:
+        main_class = names[0]
+    return f"{package}.{main_class}" if package else main_class
 
 
 def write_jar(classes: Path, binary: Path, main_class: str) -> None:
@@ -311,6 +695,11 @@ def write_jar(classes: Path, binary: Path, main_class: str) -> None:
                 jar.write(path, path.relative_to(classes).as_posix())
 
 
+def read_text(path: Path) -> str:
+    """A source file's text, any bytes that are not UTF-8 replaced."""
+    return path.read_bytes().decode("utf-8", errors="replace")
+
+
 def source_name(source: Path, suffix: str) -> str:
     """The name the source is compiled under, so the log names the contestant's file.
 
@@ -320,6 +709,13 @@ def source_name(source: Path, suffix: str) -> str:
     if SAFE_NAME.fullmatch(name) and name.endswith(suffix):
         return name
     return "main" + suffix
+
+
+def argument(path: str) -> str:
+    """A relative path as a compiler argument, never read as an option or an
+    argument file.
+    """
+    return path if PLAIN_START.match(path) else f"./{path}"
 
 
 def run_tool(command: list[str], cwd: Path, *, limit_address_space: bool) -> Tool:
@@ -354,6 +750,8 @@ def run_tool(command: list[str], cwd: Path, *, limit_address_space: bool) -> Too
             preexec_fn=limits,
         )
     except OSError as error:
+        if error.errno == errno.E2BIG:
+            return Tool(1, "the source folder's paths are too long to compile\n")
         raise PrimitiveError(
             f"the compiler {command[0]} could not be started: {error.strerror}"
         ) from None

@@ -34,6 +34,53 @@ SOURCES = {
     ),
 }
 
+FOLDERS: dict[str, tuple[dict[str, str], str | None]] = {
+    "c": (
+        {
+            "main.c": '#include <stdio.h>\n#include "lib/twice.h"\n'
+            'int main(void) { int n; scanf("%d", &n);'
+            ' printf("%d\\n", twice(n)); return 0; }\n',
+            "lib/twice.h": "int twice(int n);\n",
+            "lib/twice.c": '#include "twice.h"\nint twice(int n) { return 2 * n; }\n',
+            "notes.txt": "not a source\n",
+        },
+        None,
+    ),
+    "cpp": (
+        {
+            "solution.cpp": "#include <iostream>\nint twice(int n);\n"
+            "int main() { int n; std::cin >> n; std::cout << twice(n) << '\\n'; }\n",
+            "src/twice.cc": "int twice(int n) { return 2 * n; }\n",
+            "test/driver.cpp": "int main() { return 1; }\n",
+        },
+        "solution.cpp",
+    ),
+    "java": (
+        {
+            "com/example/Main.java": "package com.example;\n"
+            "import com.example.util.Twice;\n"
+            "public class Main {\n  public static void main(String[] args) {\n"
+            "    int n = new java.util.Scanner(System.in).nextInt();\n"
+            "    System.out.println(Twice.of(n));\n  }\n}\n",
+            "com/example/util/Twice.java": "package com.example.util;\n"
+            "public class Twice { public static int of(int n) { return 2 * n; } }\n",
+        },
+        None,
+    ),
+    "python": (
+        {
+            "app/main.py": "import sys\nfrom twice import twice\n"
+            "print(twice(int(sys.stdin.readline())))\n",
+            "app/twice.py": "def twice(n):\n    return 2 * n\n",
+            "tools/check.py": 'if __name__ == "__main__":\n    print("not this one")\n',
+        },
+        "app/main.py",
+    ),
+}
+"""A program of several files in nested folders for each language, and the
+entry it names, None when it is found without one. Each doubles the number it
+reads."""
+
 BROKEN = {
     "python": ("main.py", "print(int(input()) * 2\n", "was never closed"),
     "c": ("main.c", "int main(void) { return x; }\n", "main.c:1:"),
@@ -76,13 +123,25 @@ def open_up(work: Path) -> None:
         path.chmod(0o777 if path.is_dir() else 0o666)
 
 
-def step_inputs(work: Path, name: str, text: str, language: str) -> None:
-    """Write inputs.json and the source for one compile."""
-    source = work / "in" / "1" / name
-    source.parent.mkdir(parents=True)
-    source.write_text(text)
-    document = {
-        "schema_version": 4,
-        "inputs": {"source": {"file": f"in/1/{name}"}, "language": language},
+def step_inputs(
+    work: Path, files: dict[str, str], language: str, entry: str | None = None
+) -> None:
+    """Write inputs.json and the source folder, `files` by path, for one compile.
+
+    The folder is `in/1/source`, where the harness places a folder input, and
+    a single uploaded file as a folder holding that one file.
+    """
+    folder = work / "in" / "1" / "source"
+    folder.mkdir(parents=True)
+    for name, text in files.items():
+        path = folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, newline="\n")
+    inputs: dict[str, object] = {
+        "source": {"folder": "in/1/source"},
+        "language": language,
     }
+    if entry is not None:
+        inputs["entry"] = entry
+    document = {"schema_version": 5, "inputs": inputs}
     (work / "inputs.json").write_text(json.dumps(document))
