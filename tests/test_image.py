@@ -125,6 +125,38 @@ def test_a_source_that_does_not_compile_is_a_compile_error(
     assert not (tmp_path / "out" / "binary").exists()
 
 
+@pytest.mark.parametrize(
+    ("files", "language", "line"),
+    [
+        ({"Main.java": "/*a" * 40000}, "java", "Main.java:1:"),
+        (
+            {"Main.java": 'class Main { String s = """\n' + "a" * 200_000},
+            "java",
+            "Main.java:1:",
+        ),
+        (
+            {"a.java": "public " * 30_000, "b.java": "static " * 30_000},
+            "java",
+            "the entry is not clear",
+        ),
+        ({"a.c": "/*a" * 40000, "b.c": "main()" * 40_000}, "c", "the entry is not"),
+    ],
+)
+def test_sources_made_to_be_slow_to_read_are_a_compile_error(
+    tmp_path: Path,
+    run_image: RunImage,
+    files: dict[str, str],
+    language: str,
+    line: str,
+) -> None:
+    """Sources shaped to make finding main or the Java class names slow are
+    read in one pass, and end as the compile error they are."""
+    step_inputs(tmp_path, files, language)
+    result = run_image(tmp_path)
+    assert result["outputs"]["outcome"] == "compile_error"
+    assert line in result["outputs"]["compile_log"]
+
+
 def test_a_huge_compile_log_is_cut(tmp_path: Path, run_image: RunImage) -> None:
     """Thousands of errors still give a log of bounded size."""
     text = "".join(f"int f{n}(void) {{ return y{n}; }}\n" for n in range(3000))

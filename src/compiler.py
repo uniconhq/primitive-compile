@@ -33,6 +33,7 @@ import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import FrameType
 
 SCHEMA_VERSION = 5
 LANGUAGES = ("c", "cpp", "java", "python")
@@ -88,6 +89,9 @@ exec(code, main.__dict__)
 module, with the entry's own folder first on the import path, as `python3
 <entry>` does."""
 TOOL_PATH = "/usr/local/bin:/usr/bin:/bin"
+PREPARE_SECONDS = 10
+"""How long reading and copying the source folder may take, before any
+compiler runs."""
 SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PLAIN_START = re.compile(r"[A-Za-z0-9_]")
 JAVA_NAME = r"[A-Za-z_$][A-Za-z0-9_$]*"
@@ -95,26 +99,42 @@ JAVA_FILE_NAME_LIMIT = 200
 """The longest public class name the source is saved under; a longer one could
 not name a file, so javac is left to refuse it as a compile error.
 """
-JAVA_NOISE = re.compile(
-    r'"""(?:\\.|[^\\])*?"""|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''
-    r"|//[^\n]*|/\*.*?\*/",
-    re.DOTALL,
+C_LITERAL = (
+    r'"[^"\\\n]*+(?:\\.[^"\\\n]*+)*+"?'
+    r"|'[^'\\\n]*+(?:\\.[^'\\\n]*+)*+'?"
 )
+JAVA_TEXT_BLOCK = r'"""[^"\\]*+(?:(?:\\.|"(?!""))[^"\\]*+)*+(?:""")?'
+NOISE = {
+    "c": re.compile(rf"{C_LITERAL}|/", re.DOTALL),
+    "java": re.compile(rf"{JAVA_TEXT_BLOCK}|{C_LITERAL}|/", re.DOTALL),
+}
+"""A whole literal, or a `/` that may open a comment. A string or character
+literal runs to its closing quote, escapes skipped, or else to the end of its
+line; a Java text block to its closing triple quote, or else to the end of
+the text. Every part is possessive, so a literal is read once."""
 JAVA_PACKAGE = re.compile(
-    rf"^\s*package\s+({JAVA_NAME}(?:\s*\.\s*{JAVA_NAME})*)\s*;", re.M
+    rf"^[^\S\n]*package\s+({JAVA_NAME}(?:\s*\.\s*{JAVA_NAME})*)\s*;", re.M
 )
+JAVA_TYPE = r"(?:class|interface|enum|record)\s++"
 JAVA_TOP_LEVEL = re.compile(
-    r"[{}]|\b((?:(?:public|abstract|final|sealed|non-sealed|strictfp)\s+)*)"
-    rf"(?:class|interface|enum|record)\s+({JAVA_NAME})"
+    r"[{}]|(?<![A-Za-z0-9_$])(?:"
+    r"((?:(?:public|abstract|final|sealed|non-sealed|strictfp)\s++)++)"
+    rf"(?:{JAVA_TYPE}({JAVA_NAME}))?|{JAVA_TYPE}({JAVA_NAME}))"
 )
+"""A brace, a run of type modifiers with the type it declares if any, or a
+type declared without modifiers."""
 JAVA_MAIN = re.compile(
-    r"\b((?:(?:public|protected|private|static|final|synchronized|strictfp)\s+)+)"
-    r"void\s+main\s*\("
+    r"(?<![A-Za-z0-9_$])"
+    r"((?:(?:public|protected|private|static|final|synchronized|strictfp)\s++)++)"
+    r"(void\s++main\s*+\()?"
 )
-C_NOISE = re.compile(
-    r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|//[^\n]*|/\*.*?\*/', re.DOTALL
-)
-C_MAIN = re.compile(r"(?<![\w.:>])main\s*\([^;{}]{0,2000}\)[^;{}()]{0,200}\{")
+"""A run of method modifiers, with `void main(` if it follows."""
+C_MAIN_NAME = re.compile(r"(?<![\w.:>])main\s*+\(")
+C_STOP = re.compile(r"[;{}]")
+C_PARAMETERS_LIMIT = 2000
+C_AFTER_PARAMETERS_LIMIT = 200
+"""How far a C or C++ `main(` may be from the `)` that closes its parameters,
+and that `)` from the `{` of its body, for the file to count as defining main."""
 PYTHON_MAIN = re.compile(
     r"^if\s+(?:__name__\s*==\s*(['\"])__main__\1|(['\"])__main__\2\s*==\s*__name__)"
     r"\s*:",
@@ -158,13 +178,15 @@ class Tool:
 class Program:
     """The source folder as copied for compiling, by paths relative to the copy.
 
-    `files` is every file of the folder, `sources` those compiled as the
-    language's sources and `entry` the file to start from.
+    `files` is every file of the folder, `sources` those the compiler is given,
+    `entry` the file to start from and, for Java, `main_class` the class the
+    jar runs, with its package.
     """
 
     files: list[str]
     sources: list[str]
     entry: str
+    main_class: str | None = None
 
 
 def main(argv: list[str]) -> int:
@@ -247,7 +269,7 @@ def compile_source(
     build = Path(tempfile.mkdtemp(prefix="compile-"))
     try:
         source = build / "source"
-        program = prepare(folder, source, language, entry)
+        program = prepare_in_time(folder, source, language, entry)
         if language == "python":
             tool = compile_python(program, source, binary)
         elif language == "java":
@@ -270,6 +292,31 @@ def compile_source(
     return {"compile_log": tool.log, "outcome": "compile_error"}
 
 
+def prepare_in_time(
+    folder: Path, source: Path, language: str, entry: str | None
+) -> Program:
+    """`prepare`, stopped as a compile error once it has run `PREPARE_SECONDS`.
+
+    Everything `prepare` does is linear in the size of the folder, so this is
+    a backstop: a folder that still takes that long ends as `compile_error`
+    with a line in the log, never as the container killed at its time limit.
+    """
+
+    def stop(signal_number: int, frame: FrameType | None) -> None:
+        raise CompileError(
+            f"reading the source folder took longer than {PREPARE_SECONDS} seconds"
+            " and was stopped"
+        )
+
+    previous = signal.signal(signal.SIGALRM, stop)
+    signal.setitimer(signal.ITIMER_REAL, PREPARE_SECONDS)
+    try:
+        return prepare(folder, source, language, entry)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def prepare(folder: Path, source: Path, language: str, entry: str | None) -> Program:
     """Copy the source folder to `source` and work out what to compile.
 
@@ -277,15 +324,16 @@ def prepare(folder: Path, source: Path, language: str, entry: str | None) -> Pro
     name it is compiled as. A larger folder is copied with its layout, its
     sources are its files with the language's extensions, and the entry is
     the one named, or else the one source, or else the one source that holds
-    main (see the README).
+    main (see the README). For C and C++ a source other than the entry that
+    holds main is left out; for Java the entry gives the class the jar runs.
     """
     files = folder_files(folder)
     if entry is not None:
         entry = entry_path(entry, files)
     if len(files) == 1:
-        name = single_name(folder / files[0], language)
+        name, main_class = single_file(folder / files[0], language)
         copy_file(folder / files[0], source / name)
-        return Program([name], [name], name)
+        return Program([name], [name], name, main_class)
     sources = [path for path in files if path.endswith(EXTENSIONS[language])]
     if entry is None:
         entry = find_entry(folder, sources, language)
@@ -294,9 +342,18 @@ def prepare(folder: Path, source: Path, language: str, entry: str | None) -> Pro
             f"the entry {entry} is not a {LANGUAGE_NAMES[language]} source file"
             f" ({', '.join(EXTENSIONS[language])})"
         )
+    main_class = None
+    if language == "java":
+        main_class = java_main_class(*java_declarations(read_text(folder / entry)))
+    elif language != "python":
+        sources = [
+            path
+            for path in sources
+            if path == entry or not holds_main(folder / path, language)
+        ]
     for path in files:
         copy_file(folder / path, source / path)
-    return Program(files, sources, entry)
+    return Program(files, sources, entry, main_class)
 
 
 def folder_files(folder: Path) -> list[str]:
@@ -383,27 +440,102 @@ def holds_main(path: Path, language: str) -> bool:
     if language == "python":
         return PYTHON_MAIN.search(text) is not None
     if language == "java":
-        code = JAVA_NOISE.sub(" ", text)
-        return any(
-            "static" in match.group(1).split() for match in JAVA_MAIN.finditer(code)
-        )
-    return C_MAIN.search(C_NOISE.sub(" ", text)) is not None
+        return java_holds_main(code_only(text, "java"))
+    return c_holds_main(code_only(text, "c"))
 
 
-def single_name(path: Path, language: str) -> str:
-    """The name the only file of a folder is compiled under.
+def c_holds_main(code: str) -> bool:
+    """Whether C or C++ code, its comments and literals blanked, defines `main`.
+
+    That is `main(` not after a name, `.`, `::` or `->`, then within
+    `C_PARAMETERS_LIMIT` characters a `)` with no `;`, `{` or `}` before it,
+    then within `C_AFTER_PARAMETERS_LIMIT` characters, none of them `;`, a
+    brace or a parenthesis, the `{` of a body. Each `main(` is checked against
+    the first `;` or brace after it, found once for every `main(` before it,
+    so the code is read in one pass.
+    """
+    stop = closing = -1
+    for match in C_MAIN_NAME.finditer(code):
+        opened = match.end()
+        if stop < opened:
+            found = C_STOP.search(code, opened)
+            if found is None:
+                return False
+            stop = found.start()
+            start = max(0, stop - C_AFTER_PARAMETERS_LIMIT - 1)
+            closing = max(code.rfind("(", start, stop), code.rfind(")", start, stop))
+        if (
+            code[stop] == "{"
+            and closing >= opened
+            and code[closing] == ")"
+            and closing - opened <= C_PARAMETERS_LIMIT
+        ):
+            return True
+    return False
+
+
+def java_holds_main(code: str) -> bool:
+    """Whether Java code, its comments and literals blanked, declares a
+    `static void main(`: `void main (` after a run of method modifiers that
+    includes `static`.
+
+    Each match takes a whole run of modifiers, so no run is read twice.
+    """
+    return any(
+        match.group(2) and "static" in match.group(1).split()
+        for match in JAVA_MAIN.finditer(code)
+    )
+
+
+def code_only(text: str, language: str) -> str:
+    """The text with each comment and string or character literal replaced by
+    one space, for C and C++ (`c`) or Java (`java`).
+
+    One pass from the start, in one of a few states: code, kept up to the
+    next `/` or quote; a line comment, skipped to the end of its line; a
+    block comment, to `*/`; a string or character literal, to its closing
+    quote, escapes skipped, or else to the end of its line; and for Java a
+    text block, to its closing triple quote. A block comment or text block
+    left open runs to the end of the text. Nothing is read twice, so the time
+    is linear in the length of the text whatever it holds.
+    """
+    noise = NOISE[language]
+    kept: list[str] = []
+    position = looked = 0
+    while found := noise.search(text, looked):
+        start, end = found.span()
+        if text[start] == "/":
+            follower = text[start + 1 : start + 2]
+            if follower == "/":
+                end = text.find("\n", start + 2)
+            elif follower == "*":
+                end = text.find("*/", start + 2)
+                end = -1 if end < 0 else end + 2
+            else:
+                looked = end
+                continue
+        kept += (text[position:start], " ")
+        if end < 0:
+            return "".join(kept)
+        position = looked = end
+    kept.append(text[position:])
+    return "".join(kept)
+
+
+def single_file(path: Path, language: str) -> tuple[str, str | None]:
+    """The name the only file of a folder is compiled under, and for Java the
+    class the jar runs.
 
     Java is named after the public top-level type, as javac requires, or
     `Main.java` when there is none; the others keep a plain name of the
     language's own extension and fall back to `main`.
     """
     if language != "java":
-        return source_name(path, EXTENSIONS[language][0])
-    public = [
-        name for name, is_public in java_declarations(read_text(path))[1] if is_public
-    ]
+        return source_name(path, EXTENSIONS[language][0]), None
+    package, types = java_declarations(read_text(path))
+    public = [name for name, is_public in types if is_public]
     named = public[0] if public and len(public[0]) <= JAVA_FILE_NAME_LIMIT else "Main"
-    return f"{named}.java"
+    return f"{named}.java", java_main_class(package, types)
 
 
 def copy_file(origin: Path, target: Path) -> None:
@@ -420,14 +552,9 @@ def copy_file(origin: Path, target: Path) -> None:
 def compile_native(program: Program, source: Path, binary: Path, language: str) -> Tool:
     """Compile C or C++ with gcc into one statically linked executable.
 
-    The entry and every other source is compiled and linked, except a source
-    other than the entry that defines its own main.
+    The entry comes first, then the program's other sources.
     """
-    others = [
-        path
-        for path in program.sources
-        if path != program.entry and not holds_main(source / path, language)
-    ]
+    others = [path for path in program.sources if path != program.entry]
     if language == "c":
         command = ["gcc", "-x", "c", "-std=gnu17"]
     else:
@@ -482,19 +609,9 @@ def write_zip_application(source: Path, program: Program, binary: Path) -> None:
 def compile_java(program: Program, source: Path, build: Path, binary: Path) -> Tool:
     """Compile Java with javac and pack the classes as a runnable jar.
 
-    Every source is compiled. The main class is the entry's public top-level
-    type, or else its top-level type named `Main`, or else its first
-    top-level type, in the entry's package.
+    Every source is compiled, and the jar runs the program's main class.
     """
-    package, types = java_declarations(read_text(source / program.entry))
-    public = [name for name, is_public in types if is_public]
-    names = [name for name, _ in types]
-    if public:
-        main_class = public[0]
-    elif "Main" in names or not names:
-        main_class = "Main"
-    else:
-        main_class = names[0]
+    qualified = program.main_class or "Main"
     classes = build / "classes"
     classes.mkdir()
     command = [
@@ -515,7 +632,6 @@ def compile_java(program: Program, source: Path, build: Path, binary: Path) -> T
     tool = run_tool(command, source, limit_address_space=False)
     if not tool.ok:
         return tool
-    qualified = f"{package}.{main_class}" if package else main_class
     if not (classes / (qualified.replace(".", "/") + ".class")).is_file():
         return Tool(
             1,
@@ -534,22 +650,39 @@ def java_declarations(text: str) -> tuple[str, list[tuple[str, bool]]]:
 
     Comments and string literals are blanked first, then braces are counted so
     that only types declared outside every other type are listed, each with
-    whether it is public.
+    whether it is public. Each match takes a whole run of modifiers, so no
+    run is read twice.
     """
-    code = JAVA_NOISE.sub(" ", text)
+    code = code_only(text, "java")
     package_match = JAVA_PACKAGE.search(code)
     package = re.sub(r"\s", "", package_match.group(1)) if package_match else ""
     types: list[tuple[str, bool]] = []
     depth = 0
     for match in JAVA_TOP_LEVEL.finditer(code):
-        token = match.group(0)
+        token = match.group()
         if token == "{":
             depth += 1
         elif token == "}":
             depth = max(0, depth - 1)
-        elif depth == 0:
-            types.append((match.group(2), "public" in match.group(1).split()))
+        elif depth == 0 and (name := match.group(2) or match.group(3)):
+            types.append((name, "public" in (match.group(1) or "").split()))
     return package, types
+
+
+def java_main_class(package: str, types: list[tuple[str, bool]]) -> str:
+    """The class the jar runs, with its package: the entry's public top-level
+    type, or else its top-level type named `Main`, or else its first top-level
+    type.
+    """
+    public = [name for name, is_public in types if is_public]
+    names = [name for name, _ in types]
+    if public:
+        main_class = public[0]
+    elif "Main" in names or not names:
+        main_class = "Main"
+    else:
+        main_class = names[0]
+    return f"{package}.{main_class}" if package else main_class
 
 
 def write_jar(classes: Path, binary: Path, main_class: str) -> None:

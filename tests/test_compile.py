@@ -8,8 +8,10 @@ need it installed.
 import errno
 import json
 import shutil
+import signal
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -77,6 +79,12 @@ def make_folder(root: Path, files: dict[str, str]) -> Path:
             [("Helper", False), ("Main", True)],
         ),
         ("package  x . y ;\ninterface Shape {}\n", "x.y", [("Shape", False)]),
+        (
+            "/* c */ package p;\npublic  final\nclass Solution {}\npublic void x;\n"
+            'final public class Twice {}\nclass Open { String t = """\n}',
+            "p",
+            [("Solution", True), ("Twice", True), ("Open", False)],
+        ),
         ("", "", []),
     ],
 )
@@ -135,6 +143,14 @@ def test_argument(path: str, used: str) -> None:
         ("java", "class A { static public void main(String... a) {} }", True),
         ("java", "class A { public void main(String[] a) {} }", False),
         ("java", "class A { // public static void main(String[] a)\n}", False),
+        ("java", "class A { final public\n  static void main (String[] a) {} }", True),
+        ("java", 'class A { String s = """\nstatic void main(\n"""; }', False),
+        ("java", "class A { static int main(String[] a) {} }", False),
+        ("c", "int main(void) { /* left open", True),
+        ("c", "/* left open\nint main(void) { return 0; }\n", False),
+        ("c", 'char *s = "open\nint main(void) { return 0; }\n', True),
+        ("cpp", 'int main(int a = f("{")) { return 0; }\n', True),
+        ("c", "int main(void) /* x */ ;\n", False),
         ("python", 'if __name__ == "__main__":\n    main()\n', True),
         ("python", "if '__main__' == __name__:\n    main()\n", True),
         ("python", "def main():\n    pass\nmain()\n", False),
@@ -146,6 +162,80 @@ def test_holds_main(tmp_path: Path, language: str, text: str, holds: bool) -> No
     path = tmp_path / "source"
     path.write_text(text)
     assert compiler.holds_main(path, language) is holds
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "code"),
+    [
+        ("a /* b */ c // d\ne", "c", "a   c  \ne"),
+        ('x = "a\\"b"; y', "c", "x =  ; y"),
+        ("c = '\\''; d", "java", "c =  ; d"),
+        ('s = "open\nnext', "c", "s =  \nnext"),
+        ("a /* open", "c", "a  "),
+        ("a / b // end", "c", "a / b  "),
+        ('t = """\nq " "" \\""" x\n"""; u', "java", "t =  ; u"),
+        ('t = """ open /* x', "java", "t =  "),
+        ('a """b""" c', "c", "a     c"),
+    ],
+)
+def test_code_only(text: str, language: str, code: str) -> None:
+    """Each comment and literal becomes one space; one left open runs to the
+    end of its line, or for a block comment or text block to the end."""
+    assert compiler.code_only(text, language) == code
+
+
+@pytest.mark.parametrize(
+    ("language", "text"),
+    [
+        ("c", "/*a" * 40000),
+        ("java", "/*a" * 40000),
+        ("java", 'class A { String s = """\n' + "a" * 200_000),
+        ("java", 'class A { String s = """' + '""\\"' * 50_000),
+        ("c", "'" * 200_000),
+        ("java", "public " * 30_000),
+        ("java", "static " * 30_000),
+        ("java", "\n" * 200_000),
+        ("java", "package " + "a." * 100_000),
+        ("c", "main()" * 40_000),
+    ],
+)
+def test_reading_a_source_takes_linear_time(
+    tmp_path: Path, language: str, text: str
+) -> None:
+    """Sources shaped to make a backtracking search slow are read in well
+    under a second."""
+    path = tmp_path / "source"
+    path.write_text(text)
+    started = time.monotonic()
+    compiler.holds_main(path, language)
+    if language == "java":
+        compiler.java_declarations(text)
+    assert time.monotonic() - started < 1
+
+
+def test_reading_the_folder_past_its_time_is_a_compile_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preparing the folder is stopped at its deadline as a failed compile with
+    a line in the log, and the timer is cleared after."""
+    monkeypatch.setattr(compiler, "PREPARE_SECONDS", 1)
+
+    def slow(folder: Path) -> list[str]:
+        time.sleep(30)
+        return []
+
+    monkeypatch.setattr(compiler, "folder_files", slow)
+    step_inputs(tmp_path, {"main.py": "pass\n"}, "python")
+    started = time.monotonic()
+    result = outputs(tmp_path)
+    assert time.monotonic() - started < 10
+    assert result["outputs"] == {
+        "compile_log": "reading the source folder took longer than 1 seconds"
+        " and was stopped\n",
+        "outcome": "compile_error",
+    }
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    assert signal.getsignal(signal.SIGALRM) == signal.SIG_DFL
 
 
 def test_folder_files_lists_regular_files_by_sorted_path(tmp_path: Path) -> None:
