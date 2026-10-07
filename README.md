@@ -30,9 +30,9 @@ contestant's, and the compilers run over it, so it is marked `runs: true`.
 Whatever it makes them do ends as `compile_error`, with a line in the log
 saying why: a source that does not compile; one that makes a compiler go
 over its time, memory or file-size limit, crash or print without end; a
-folder that is empty, holds too many files or does not fit the scratch
-space; an entry that is not in the folder or not clear; a binary over
-32 MB. None of these is `error`, a container killed at its limit, or an
+folder that is empty, holds too many files, does not fit the scratch space
+or takes too long to read; an entry that is not in the folder or not clear;
+a binary over 32 MB. None of these is `error`, a container killed at its limit, or an
 output over the harness's caps. The log kept from the compilers is cut to
 the size of the `compile_log` port, 64 KB (see Limits).
 
@@ -80,8 +80,10 @@ source that holds main:
 | `java` | Declares a `static void main` method |
 | `python` | Has a top-level line `if __name__ == "__main__":`, either quotes, either side first |
 
-Comments and string literals are ignored for C, C++ and Java. When no source
-holds main, or more than one does, the outcome is `compile_error` and the log
+Comments and string and character literals (and Java's text blocks) are
+ignored for C, C++ and Java. A block comment or text block left open runs to
+the end of the file, and a string or character literal left open to the end
+of its line. When no source holds main, or more than one does, the outcome is `compile_error` and the log
 says so and asks for the entry, for example:
 
 ```
@@ -169,6 +171,11 @@ killed, which would be a `system_error`:
 
 - 1000 files and folders in the source folder, counted before anything is
   copied;
+- 10 seconds for preparing the folder before any compiler runs: listing it,
+  copying it, and reading its sources for the entry and the Java class
+  names. Each source is read in one pass, in time linear in its size
+  whatever it holds, so only a folder of megabytes made to be slow reaches
+  the limit; past it the outcome is `compile_error` and the log says so;
 - the scratch space under `/tmp` the folder is copied into: a folder that
   does not fit is a `compile_error`, the log saying the copy failed;
 - 30 seconds of wall time for each compiler, after which its whole process
