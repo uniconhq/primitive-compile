@@ -1,11 +1,28 @@
+title: Compile
+description: Compiles the contestant's source files into one program.
 batch: false
 network: false
 limits: {time_ms: 60000, cpu_ms: 60000, memory_mb: 1024, pids: 128, output_mb: 64, gpus: 0}
 inputs:
-  source: {type: folder, runs: true}
-  language: {type: enum, options: [c, cpp, java, python]}
-  entry: {type: text, optional: true}
+  source:
+    type: folder
+    runs: true
+    description: The source files to compile, with their layout.
+  language:
+    type: enum
+    options: [c, cpp, java, python]
+    description: The language the source files are written in.
+  entry:
+    type: text
+    optional: true
+    description: The file the program starts from, such as src/Main.java.
 outputs:
-  binary: {type: file}
-  compile_log: {type: text}
-  outcome: {type: outcome}
+  binary:
+    type: file
+    description: The compiled program, ready to run.
+  compile_log:
+    type: text
+    description: Everything the compiler printed.
+  outcome:
+    type: outcome
+    description: Accepted when the source compiled, compile error when it did not.
