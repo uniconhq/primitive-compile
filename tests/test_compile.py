@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 import compiler
-from support import BROKEN, FOLDERS, SOURCES, step_inputs
+from support import BROKEN, FOLDERS, SOURCES, declaration, step_inputs
 
 
 def outputs(work: Path) -> dict[str, Any]:
@@ -498,6 +498,27 @@ def test_a_binary_over_the_limit_is_a_compile_error(
     assert result["outputs"]["outcome"] == "compile_error"
     assert result["outputs"]["compile_log"].endswith("larger than 32 MB\n")
     assert not (tmp_path / "out" / "binary").exists()
+
+
+def test_the_declaration_says_what_each_outcome_it_reports_means(
+    tmp_path: Path,
+) -> None:
+    """The outcome port's outcomes are exactly the ones a compile gives, each
+    with a line saying when, for the workflow editor's drawer.
+    """
+    reported = set()
+    for case, (name, text) in (
+        ("good", SOURCES["python"]),
+        ("broken", BROKEN["python"][:2]),
+    ):
+        step_inputs(tmp_path / case, {name: text}, "python")
+        reported.add(outputs(tmp_path / case)["outputs"]["outcome"])
+
+    outcomes = declaration()["outputs"]["outcome"]["outcomes"]
+
+    assert list(outcomes) == ["accepted", "compile_error"]
+    assert set(outcomes) == reported
+    assert all(isinstance(when, str) and "\n" not in when for when in outcomes.values())
 
 
 def test_python_that_does_not_compile_is_a_compile_error(tmp_path: Path) -> None:

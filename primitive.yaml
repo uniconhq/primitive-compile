@@ -25,4 +25,7 @@ outputs:
     description: Everything the compiler printed.
   outcome:
     type: outcome
-    description: Accepted when the source compiled, compile error when it did not.
+    description: Whether the source compiled.
+    outcomes:
+      accepted: the source compiles
+      compile_error: it does not compile, or the compiler goes over a limit
