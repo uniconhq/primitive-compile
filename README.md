@@ -21,7 +21,7 @@ version 5, published by the [runner](https://github.com/uniconhq/runner).
 | Input | `entry` | text, optional | The file to start from, by its path in the folder, such as `src/Main.java` |
 | Output | `binary` | file | `out/binary`, written when the compile succeeded |
 | Output | `compile_log` | text | Everything the compilers printed, standard output and error together, and any note of why the compile failed |
-| Output | `outcome` | outcome | `accepted` when the source compiled, `compile_error` when it did not |
+| Output | `outcome` | outcome | `accepted` when the source compiled, `compile_error` when it did not; `primitive.yaml` says the same under `outcomes`, for the workflow editor |
 
 The step runs once per submission (`batch: false`).
 
@@ -216,6 +216,10 @@ tests/                      unit tests, and image tests that run it on Docker
 
 `primitive.yaml` has no `image` line here: bootstrap writes the image by
 digest, from the release manifest, into the version it creates at the forge.
+Its `title`, its `description`s and the `outcome` port's `outcomes`, each
+outcome the program can report with a line saying when, are what the
+workflow editor shows; a test keeps `outcomes` to exactly the outcomes the
+program gives.
 It names neither the primitive nor its version: the repo at the forge is the
 name and the release tag the version.
 
