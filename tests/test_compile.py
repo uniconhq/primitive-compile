@@ -19,7 +19,14 @@ from typing import Any
 import pytest
 
 import compiler
-from support import BROKEN, FOLDERS, SOURCES, declaration, step_inputs
+from support import (
+    BROKEN,
+    FOLDERS,
+    SOURCES,
+    declaration,
+    returned_outcomes,
+    step_inputs,
+)
 
 
 def outputs(work: Path) -> dict[str, Any]:
@@ -519,6 +526,15 @@ def test_the_declaration_says_what_each_outcome_it_reports_means(
     assert list(outcomes) == ["accepted", "compile_error"]
     assert set(outcomes) == reported
     assert all(isinstance(when, str) and "\n" not in when for when in outcomes.values())
+
+
+def test_the_declaration_says_every_outcome_a_compile_can_give() -> None:
+    """The declared outcomes are every one `compile_source` can return, read
+    from its source, so a new way to an outcome needs its line too.
+    """
+    outcomes = declaration()["outputs"]["outcome"]["outcomes"]
+
+    assert set(outcomes) == returned_outcomes(compiler.compile_source)
 
 
 def test_python_that_does_not_compile_is_a_compile_error(tmp_path: Path) -> None:
