@@ -44,9 +44,9 @@ def has_tool(name: str) -> bool:
 
 
 def run_python(work: Path, stdin: str) -> str:
-    """Run a Python binary the way sandbox-run does and return what it printed."""
+    """Run a Python binary the way exec does and return what it printed."""
     return subprocess.run(
-        [sys.executable, "-I", "-B", str(work / "out" / "binary")],
+        [sys.executable, "-I", "-B", str(work / "out" / "program")],
         input=stdin,
         capture_output=True,
         text=True,
@@ -237,8 +237,7 @@ def test_reading_the_folder_past_its_time_is_a_compile_error(
     result = outputs(tmp_path)
     assert time.monotonic() - started < 10
     assert result["outputs"] == {
-        "compile_log": "reading the source folder took longer than 1 seconds"
-        " and was stopped\n",
+        "log": "reading the source folder took longer than 1 seconds and was stopped\n",
         "outcome": "compile_error",
     }
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
@@ -349,29 +348,30 @@ def test_an_entry_that_is_not_clear_is_a_compile_error(
         (None, "inputs.json is not in the working directory"),
         ("{", "inputs.json is not valid JSON"),
         ("[]", "inputs.json is not a JSON object"),
-        ({"schema_version": 4, "inputs": {}}, "contract version 5"),
-        ({"schema_version": 5, "batch": []}, "no inputs object"),
+        ({"schema_version": 4, "inputs": {}}, "contract version 6"),
+        ({"schema_version": 5, "inputs": {}}, "contract version 6"),
+        ({"schema_version": 6, "batch": []}, "no inputs object"),
         (
-            {"schema_version": 5, "inputs": {"language": "c"}},
+            {"schema_version": 6, "inputs": {"language": "c"}},
             "the input named source is not a folder",
         ),
         (
             {
-                "schema_version": 5,
+                "schema_version": 6,
                 "inputs": {"source": {"file": "in/1/main.c"}, "language": "c"},
             },
             "the input named source is not a folder",
         ),
         (
             {
-                "schema_version": 5,
+                "schema_version": 6,
                 "inputs": {"source": {"folder": "in/.."}, "language": "c"},
             },
             "the input named source is outside in/",
         ),
         (
             {
-                "schema_version": 5,
+                "schema_version": 6,
                 "inputs": {"source": {"folder": "in/nothing"}, "language": "c"},
             },
             "the input named source is not in the working directory",
@@ -448,11 +448,11 @@ def test_python_compiles_to_a_zip_application(tmp_path: Path) -> None:
     step_inputs(tmp_path, {name: text}, "python")
     result = outputs(tmp_path)
     assert result["outputs"] == {
-        "binary": {"file": "out/binary"},
-        "compile_log": "",
+        "program": {"file": "out/program"},
+        "log": "",
         "outcome": "accepted",
     }
-    binary = tmp_path / "out" / "binary"
+    binary = tmp_path / "out" / "program"
     assert binary.read_bytes().startswith(b"#!/usr/bin/env python3\n")
     with zipfile.ZipFile(binary) as archive:
         assert archive.read("source/main.py").decode() == text
@@ -467,7 +467,7 @@ def test_a_python_folder_keeps_its_layout(tmp_path: Path) -> None:
     files, entry = FOLDERS["python"]
     step_inputs(tmp_path, files, "python", entry)
     assert outputs(tmp_path)["outputs"]["outcome"] == "accepted"
-    with zipfile.ZipFile(tmp_path / "out" / "binary") as archive:
+    with zipfile.ZipFile(tmp_path / "out" / "program") as archive:
         names = set(archive.namelist())
     assert names == {"__main__.py", *(f"source/{name}" for name in files)}
     assert run_python(tmp_path, "21\n") == "42\n"
@@ -503,8 +503,8 @@ def test_a_binary_over_the_limit_is_a_compile_error(
     step_inputs(tmp_path, {name: text}, "python")
     result = outputs(tmp_path)
     assert result["outputs"]["outcome"] == "compile_error"
-    assert result["outputs"]["compile_log"].endswith("larger than 32 MB\n")
-    assert not (tmp_path / "out" / "binary").exists()
+    assert result["outputs"]["log"].endswith("program would be larger than 32 MB\n")
+    assert not (tmp_path / "out" / "program").exists()
 
 
 def test_the_declaration_says_what_each_outcome_it_reports_means(
@@ -543,9 +543,9 @@ def test_python_that_does_not_compile_is_a_compile_error(tmp_path: Path) -> None
     step_inputs(tmp_path, {name: text}, "python")
     result = outputs(tmp_path)
     assert result["outputs"]["outcome"] == "compile_error"
-    assert expected in result["outputs"]["compile_log"]
-    assert "binary" not in result["outputs"]
-    assert not (tmp_path / "out" / "binary").exists()
+    assert expected in result["outputs"]["log"]
+    assert "program" not in result["outputs"]
+    assert not (tmp_path / "out" / "program").exists()
 
 
 def test_every_python_source_is_checked(tmp_path: Path) -> None:
@@ -554,7 +554,7 @@ def test_every_python_source_is_checked(tmp_path: Path) -> None:
     step_inputs(tmp_path, files, "python", "main.py")
     result = outputs(tmp_path)
     assert result["outputs"]["outcome"] == "compile_error"
-    assert "broken.py" in result["outputs"]["compile_log"]
+    assert "broken.py" in result["outputs"]["log"]
 
 
 @pytest.mark.parametrize(
@@ -589,8 +589,8 @@ def test_an_entry_problem_is_a_compile_error(
     step_inputs(tmp_path, files, "python", entry)
     result = outputs(tmp_path)
     assert result["outputs"]["outcome"] == "compile_error"
-    assert result["outputs"]["compile_log"].startswith(line)
-    assert "binary" not in result["outputs"]
+    assert result["outputs"]["log"].startswith(line)
+    assert "program" not in result["outputs"]
 
 
 def test_an_empty_entry_is_no_entry(tmp_path: Path) -> None:
@@ -611,7 +611,7 @@ def test_a_folder_that_cannot_be_copied_is_a_compile_error(
     step_inputs(tmp_path, {"a.py": "", "b.py": ""}, "python", "a.py")
     result = outputs(tmp_path)
     assert result["outputs"] == {
-        "compile_log": "the source folder could not be copied to compile it:"
+        "log": "the source folder could not be copied to compile it:"
         " No space left on device\n",
         "outcome": "compile_error",
     }
@@ -627,7 +627,7 @@ def test_compiled_languages(tmp_path: Path, language: str) -> None:
     step_inputs(tmp_path, {name: text}, language)
     result = outputs(tmp_path)
     assert result["outputs"]["outcome"] == "accepted", result
-    assert (tmp_path / "out" / "binary").is_file()
+    assert (tmp_path / "out" / "program").is_file()
 
 
 @pytest.mark.parametrize("language", ["c", "cpp", "java"])
@@ -642,4 +642,220 @@ def test_compiled_folders(tmp_path: Path, language: str) -> None:
     step_inputs(tmp_path, files, language, entry)
     result = outputs(tmp_path)
     assert result["outputs"]["outcome"] == "accepted", result
-    assert (tmp_path / "out" / "binary").is_file()
+    assert (tmp_path / "out" / "program").is_file()
+
+
+def notebook(*cells: tuple[str, str | list[str]], **fields: Any) -> str:
+    """A notebook of nbformat 4 holding `cells`, each its type and source."""
+    document = {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {},
+        "cells": [
+            {"cell_type": kind, "metadata": {}, "source": source}
+            | ({"outputs": [], "execution_count": None} if kind == "code" else {})
+            for kind, source in cells
+        ],
+    }
+    return json.dumps(document | fields)
+
+
+THREE_CELLS = notebook(
+    ("markdown", "# Doubling\nRead a number, print twice it."),
+    ("code", ["import sys\n", "n = int(sys.stdin.readline())"]),
+    ("code", "print(n * 2)"),
+)
+
+
+def test_a_notebook_runs_as_one_program(tmp_path: Path) -> None:
+    """Its code cells, in order, are one Python file, packed as a Python
+    program is; its markdown is passed over."""
+    step_inputs(tmp_path, {"double.ipynb": THREE_CELLS}, "ipynb")
+    result = outputs(tmp_path)
+    assert result["outputs"]["outcome"] == "accepted", result
+    assert run_python(tmp_path, "21\n") == "42\n"
+
+
+def test_a_notebooks_code_names_each_cell(tmp_path: Path) -> None:
+    code = compiler.notebook_code(THREE_CELLS, "double.ipynb")
+    assert code == (
+        "# coding: utf-8\n# cell 2\nimport sys\nn = int(sys.stdin.readline())\n"
+        "# cell 3\nprint(n * 2)\n"
+    )
+
+
+def test_a_notebook_imports_the_modules_beside_it(tmp_path: Path) -> None:
+    files = {
+        "work/run.ipynb": notebook(
+            ("code", "from twice import twice\nprint(twice(int(input())))")
+        ),
+        "work/twice.py": "def twice(n):\n    return 2 * n\n",
+        "notes.txt": "kept\n",
+    }
+    step_inputs(tmp_path, files, "ipynb")
+    assert outputs(tmp_path)["outputs"]["outcome"] == "accepted"
+    assert run_python(tmp_path, "4\n") == "8\n"
+
+
+def test_the_outputs_a_notebook_holds_are_passed_over(tmp_path: Path) -> None:
+    text = json.loads(THREE_CELLS)
+    text["cells"][2]["outputs"] = [
+        {"output_type": "stream", "name": "stdout", "text": ["%pip install x\n"]}
+    ]
+    step_inputs(tmp_path, {"double.ipynb": json.dumps(text)}, "ipynb")
+    assert outputs(tmp_path)["outputs"]["outcome"] == "accepted"
+    assert run_python(tmp_path, "5\n") == "10\n"
+
+
+@pytest.mark.parametrize(
+    ("cell", "shown"),
+    [
+        ("%pip install numpy", "%pip install numpy"),
+        ("import os\n!ls -la", "!ls -la"),
+        ("%%time\nx = 1", "%%time"),
+        ("for i in range(2):\n    %time f(i)", "%time f(i)"),
+        ("a = 1\x0cb = 2\nc = 3\n%who", "%who"),
+    ],
+)
+def test_a_magic_is_a_compile_error_naming_its_cell(
+    tmp_path: Path, cell: str, shown: str
+) -> None:
+    """There is no IPython when the program runs, so a magic or a shell
+    command could not run there."""
+    text = notebook(("markdown", "intro"), ("code", cell), ("code", "print(1)"))
+    step_inputs(tmp_path, {"run.ipynb": text}, "ipynb")
+    result = outputs(tmp_path)["outputs"]
+    assert result["outcome"] == "compile_error"
+    assert result["log"] == (
+        f"cell 2 of the notebook run.ipynb runs {shown!r}, which only IPython"
+        " runs; there is none when the program runs\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        'print("%d" % 3)',
+        "x = (10\n     % 3)\nprint(x)",
+        'text = """\n!not a command\n%neither\n"""\nprint(len(text))',
+        "# !ls in a comment\nprint(1)",
+    ],
+)
+def test_a_percent_or_bang_python_reads_is_no_magic(tmp_path: Path, cell: str) -> None:
+    step_inputs(tmp_path, {"run.ipynb": notebook(("code", cell))}, "ipynb")
+    assert outputs(tmp_path)["outputs"]["outcome"] == "accepted"
+
+
+@pytest.mark.parametrize(
+    ("text", "line"),
+    [
+        ("{", "the notebook run.ipynb is not valid JSON"),
+        ("[]", "the notebook run.ipynb is not a notebook of format 4"),
+        (
+            json.dumps({"nbformat": 3, "worksheets": []}),
+            "the notebook run.ipynb is not a notebook of format 4",
+        ),
+        (
+            json.dumps({"nbformat": 4, "cells": {}}),
+            "the notebook run.ipynb is not a notebook of format 4",
+        ),
+        (
+            notebook(("code", "print(1)"), ("code", 7)),  # type: ignore[arg-type]
+            "cell 2 of the notebook run.ipynb has no source text",
+        ),
+        (
+            notebook(("code", "print('\ud83d')")),
+            "cell 1 of the notebook run.ipynb holds text that is not Unicode",
+        ),
+    ],
+)
+def test_a_notebook_that_is_not_one_is_a_compile_error(
+    tmp_path: Path, text: str, line: str
+) -> None:
+    """What an entrant uploads is theirs, so a broken notebook is an outcome,
+    never an `error`."""
+    step_inputs(tmp_path, {"run.ipynb": text}, "ipynb")
+    result = outputs(tmp_path)["outputs"]
+    assert result == {"log": f"{line}\n", "outcome": "compile_error"}
+
+
+def test_a_syntax_error_in_a_cell_is_a_compile_error_naming_the_notebook(
+    tmp_path: Path,
+) -> None:
+    text = notebook(("code", "x = 1"), ("code", "print(x"))
+    step_inputs(tmp_path, {"run.ipynb": text}, "ipynb")
+    result = outputs(tmp_path)["outputs"]
+    assert result["outcome"] == "compile_error"
+    assert "run.ipynb" in result["log"]
+    assert "was never closed" in result["log"]
+
+
+def test_two_notebooks_need_the_entry_named(tmp_path: Path) -> None:
+    files = {
+        "a.ipynb": notebook(("code", "print('a')")),
+        "b.ipynb": notebook(("code", "print('b')")),
+    }
+    step_inputs(tmp_path, files, "ipynb")
+    result = outputs(tmp_path)["outputs"]
+    assert result["log"] == (
+        "the entry is not clear: the source folder holds 2 notebooks; name the"
+        " one to run as the entry\n"
+    )
+    named = tmp_path / "named"
+    named.mkdir()
+    step_inputs(named, files, "ipynb", "b.ipynb")
+    assert outputs(named)["outputs"]["outcome"] == "accepted"
+    assert run_python(named, "") == "b\n"
+
+
+def test_a_notebook_saved_with_a_byte_order_mark_compiles(tmp_path: Path) -> None:
+    step_inputs(tmp_path, {"double.ipynb": "\ufeff" + THREE_CELLS}, "ipynb")
+    assert outputs(tmp_path)["outputs"]["outcome"] == "accepted"
+
+
+def test_a_coding_line_in_the_first_cell_does_not_change_how_it_is_read(
+    tmp_path: Path,
+) -> None:
+    """The joined file is UTF-8 and says so on its first line, so a cell's
+    `# -*- coding: latin-1 -*-`, its second, is passed over."""
+    code = "# -*- coding: latin-1 -*-\nprint('caf\u00e9')"
+    step_inputs(tmp_path, {"run.ipynb": notebook(("code", code))}, "ipynb")
+    assert outputs(tmp_path)["outputs"]["outcome"] == "accepted"
+    assert run_python(tmp_path, "") == "caf\u00e9\n"
+
+
+def test_a_notebook_that_is_not_utf_8_is_a_compile_error(tmp_path: Path) -> None:
+    step_inputs(tmp_path, {"run.ipynb": ""}, "ipynb")
+    source = next(path for path in tmp_path.rglob("run.ipynb"))
+    source.write_bytes(notebook(("code", "print('x')")).encode() + b"\xff")
+    result = outputs(tmp_path)
+    assert result["outputs"]["outcome"] == "compile_error"
+    assert result["outputs"]["log"] == "the notebook run.ipynb is not UTF-8 text\n"
+
+
+def test_a_notebook_over_32_mb_is_refused_before_it_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = notebook(("code", "print(1)"))
+    monkeypatch.setattr(compiler, "BINARY_LIMIT", len(text) - 1)
+    step_inputs(tmp_path, {"run.ipynb": text}, "ipynb")
+    result = outputs(tmp_path)
+    assert result["outputs"]["outcome"] == "compile_error"
+    assert result["outputs"]["log"] == "the notebook run.ipynb is larger than 32 MB\n"
+
+
+def test_a_cell_that_is_not_an_object_is_passed_over() -> None:
+    text = json.loads(notebook(("code", "print(1)")))
+    text["cells"].insert(0, "stray")
+    assert (
+        compiler.notebook_code(json.dumps(text), "run.ipynb")
+        == "# coding: utf-8\n# cell 2\nprint(1)\n"
+    )
+
+
+def test_a_broken_module_beside_a_notebook_fails_the_compile(tmp_path: Path) -> None:
+    files = {"run.ipynb": notebook(("code", "print(1)")), "helper.py": "def f(:\n"}
+    step_inputs(tmp_path, files, "ipynb")
+    result = outputs(tmp_path)["outputs"]
+    assert result["outcome"] == "compile_error"
+    assert "helper.py" in result["log"]

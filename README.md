@@ -1,26 +1,30 @@
 # primitive-compile
 
-The `unicon/compile` primitive: it turns a contestant's folder of source files
-into one binary that the `unicon/sandbox-run` primitive can run, and gives
-back the compiler's log. It is the first step of the `unicon/classic`
-workflow.
+The `unicon/compile` primitive, at the forge `unicon/compile@v3`: it turns a
+folder of source files, or a notebook, into one program that the
+`unicon/exec` primitive can run, and gives back the compiler's log. The same
+compilers and flags serve every caller: an entrant's code, an organiser's
+checker and a workflow's own script, such as the diff script of
+`unicon/classic@v3`. `unicon/compile@v2`, which names its outputs `binary`
+and `compile_log` and speaks contract version 5, stays for the workflow
+versions that use it.
 
 This repo holds the image, `ghcr.io/uniconhq/primitive-compile`, built from
 the `Dockerfile`; the program the image runs, `src/compiler.py`; and
 `primitive.yaml`, the declaration the forge compiler reads to type-check a
 workflow that uses the primitive. The program is one Python file with no
 dependencies. It speaks the primitive contract, `primitive.schema.json`
-version 5, published by the [runner](https://github.com/uniconhq/runner).
+version 6, published by the [runner](https://github.com/uniconhq/runner).
 
 ## What it takes and returns
 
 | | Name | Type | What it is |
 |---|---|---|---|
 | Input | `source` | folder, `runs: true` | The contestant's source files with their layout. One uploaded file arrives as a folder holding that file, placed so by the harness |
-| Input | `language` | enum | `c`, `cpp`, `java` or `python` |
+| Input | `language` | enum | `c`, `cpp`, `java`, `python` or `ipynb`, a Jupyter notebook |
 | Input | `entry` | text, optional | The file to start from, by its path in the folder, such as `src/Main.java` |
-| Output | `binary` | file | `out/binary`, written when the compile succeeded |
-| Output | `compile_log` | text | Everything the compilers printed, standard output and error together, and any note of why the compile failed |
+| Output | `program` | file | `out/program`, written when the compile succeeded |
+| Output | `log` | text | Everything the compilers printed, standard output and error together, and any note of why the compile failed |
 | Output | `outcome` | outcome | `accepted` when the source compiled, `compile_error` when it did not; `primitive.yaml` says the same under `outcomes`, for the workflow editor |
 
 The step runs once per submission (`batch: false`).
@@ -32,17 +36,18 @@ saying why: a source that does not compile; one that makes a compiler go
 over its time, memory or file-size limit, crash or print without end; a
 folder that is empty, holds too many files, does not fit the scratch space
 or takes too long to read; an entry that is not in the folder or not clear;
-a binary over 32 MB. None of these is `error`, a container killed at its limit, or an
+a program over 32 MB; a notebook that is not one, or that runs a magic.
+None of these is `error`, a container killed at its limit, or an
 output over the harness's caps. The log kept from the compilers is cut to
-the size of the `compile_log` port, 64 KB (see Limits).
+the size of the `log` port, 64 KB (see Limits).
 
-On `compile_error` there is no binary: the harness then stops grading, the
-verdict is `compile_error`, and nothing reads `binary`.
+On `compile_error` there is no program: the run ends there, its verdict is
+`compile_error`, and nothing reads `program`.
 
 `outputs.json` carries `error` instead, and nothing else, only when the
 primitive could not work at all: `inputs.json` is missing, is not JSON or is
 for another contract version, `source` is not a folder, is missing or lies
-outside `in/`, the language is not one of the four, `entry` is not text, or
+outside `in/`, the language is not one of the five, `entry` is not text, or
 a compiler could not be started. The harness turns an error into a
 `system_error` verdict, so no contestant is graded by a broken step.
 
@@ -65,6 +70,7 @@ data file, is copied beside them.
 | `cpp` | `.cpp`, `.cc`, `.cxx` |
 | `java` | `.java` |
 | `python` | `.py` |
+| `ipynb` | `.ipynb` |
 
 The entry is the file `entry` names, by its path from the top of the folder,
 `/` between folders; a leading `./` is allowed and `..` is not. It must be a
@@ -79,6 +85,7 @@ source that holds main:
 | `c`, `cpp` | Defines a function named `main`: `main(...)` followed by a body. A member such as `Game::main` or a call such as `game.main()` does not count |
 | `java` | Declares a `static void main` method |
 | `python` | Has a top-level line `if __name__ == "__main__":`, either quotes, either side first |
+| `ipynb` | Never: a folder of two notebooks names the one to run |
 
 Comments and string and character literals (and Java's text blocks) are
 ignored for C, C++ and Java. A block comment or text block left open runs to
@@ -102,15 +109,41 @@ What the entry decides, per language:
   holds every file of the folder and runs the entry as the main module, with
   the entry's own folder first on the import path, as `python3 <entry>`
   does from the top of the folder.
+- **Notebooks.** The entry notebook becomes one Python file (below), checked
+  with every `.py` file of the folder, and is then packed as Python is, so
+  it imports the modules beside it. Other notebooks are kept as files, with
+  the outputs they hold, so they count against the 32 MB a program may
+  take.
+
+**A notebook** is read as JSON, nbformat 4. Its code cells are joined in
+order into one Python file, each behind a line `# cell <n>`, so a line in a
+traceback can be found in the notebook, and under a first line `# coding:
+utf-8`, so a coding line in the first cell changes nothing; a notebook that
+is not UTF-8, or is over 32 MB, is a `compile_error`. Markdown and raw
+cells and every output stored in the notebook are passed over, and its size
+counts against the same limits as any source. A code cell with a line IPython alone would
+run, a magic (`%pip install numpy`, `%%time`) or a shell command (`!ls`), is
+a `compile_error` naming the cell, counted from 1 among all the notebook's
+cells, since there is no IPython when the program runs:
+
+```
+cell 2 of the notebook analysis.ipynb runs '%pip install numpy', which only IPython runs; there is none when the program runs
+```
+
+The cell is read as Python tokens, so a `%` that continues an expression or
+sits in a string or a comment is not a magic. A notebook that is not JSON,
+or not nbformat 4, is a `compile_error` too, never an `error`: it is what
+the entrant uploaded.
 
 ## How each language is compiled
 
 | Language | Toolchain in the image | What the program runs |
 |---|---|---|
-| `c` | gcc 14 | `gcc -x c -std=gnu17 -O2 -pipe -static -DONLINE_JUDGE -iquote . -o out/binary <entry> <sources> -lm` |
-| `cpp` | g++ 14 | `g++ -x c++ -std=gnu++20 -O2 -pipe -static -DONLINE_JUDGE -iquote . -o out/binary <entry> <sources> -lm` |
+| `c` | gcc 14 | `gcc -x c -std=gnu17 -O2 -pipe -static -DONLINE_JUDGE -iquote . -o out/program <entry> <sources> -lm` |
+| `cpp` | g++ 14 | `g++ -x c++ -std=gnu++20 -O2 -pipe -static -DONLINE_JUDGE -iquote . -o out/program <entry> <sources> -lm` |
 | `java` | OpenJDK 21 | `javac -encoding UTF-8 -proc:none -Xlint:none -XDsuppressNotes -d classes <sources>`, then packs the classes into a jar |
 | `python` | Python 3.14 | `python3 -I -m py_compile <sources>`, then packs the folder into a zip application |
+| `ipynb` | Python 3.14 | Joins the notebook's code cells, then as `python` |
 
 The compilers run in the top of the folder's copy, and each file is named
 by its path from there. A path that does not start with a letter, a digit or
@@ -137,16 +170,16 @@ ignored when finding these names. When the chosen class did not come out of
 the compile, the outcome is `compile_error` and the log says which class it
 looked for.
 
-## The binary format
+## The program format
 
-`binary` is one file, in one of three formats. compile writes them, and
-sandbox-run tells them apart by their content.
+`program` is one file, in one of three formats. compile writes them, and
+exec tells them apart by their content.
 
-| Language | The binary | How sandbox-run runs it |
+| Language | The program | How exec runs it |
 |---|---|---|
 | `c`, `cpp` | A statically linked ELF executable | Copied to a scratch directory, marked executable and run directly |
-| `python` | A Python zip application behind the line `#!/usr/bin/env python3`: the folder under `source/` with its layout, and a `__main__.py` that runs the entry | `python3 -I -B binary`, on the image's Python 3.14 |
-| `java` | A runnable jar: the compiled classes and a manifest naming the main class | `java -Xmx<memory_limit>m -Xss64m -XX:+UseSerialGC -XX:-UsePerfData -XX:+ExitOnOutOfMemoryError -Djava.io.tmpdir=. -jar binary`, on the image's OpenJDK 21 |
+| `python`, `ipynb` | A Python zip application behind the line `#!/usr/bin/env python3`: the folder under `source/` with its layout, a notebook entry as its Python, and a `__main__.py` that runs the entry | `python3 -I -B program`, on the image's Python 3.14 |
+| `java` | A runnable jar: the compiled classes and a manifest naming the main class | `java -Xmx<memory_limit>m -Xss64m -XX:+UseSerialGC -XX:-UsePerfData -XX:+ExitOnOutOfMemoryError -Djava.io.tmpdir=. -jar program`, on the image's OpenJDK 21 |
 
 The Python binary's `__main__.py` puts the entry's folder inside the archive
 first on `sys.path` and runs the entry's code as a fresh `__main__` module
@@ -157,7 +190,7 @@ Static linking means a native binary needs nothing from the image it runs
 in. A Python or Java binary needs the interpreter it was checked against, so
 both images are built from the same pinned `python:3.14-slim` base and
 install the same Debian OpenJDK 21 packages: the JDK in compile, the runtime
-in sandbox-run. A change to any of the three formats, or to either image's
+in exec. A change to any of the three formats, or to either image's
 Python or Java, is made in both repos together.
 
 ## Limits
@@ -182,7 +215,7 @@ killed, which would be a `system_error`:
   group is killed;
 - 768 MB of address space for gcc, g++ and py_compile, and a 512 MB heap for
   javac, which reserves more address space than it uses;
-- 32 MB for any single file a compiler writes, and for the binary: the
+- 32 MB for any single file a compiler writes, and for the program: the
   zip application and the jar, which this program writes itself, are checked
   against it here, and one over it is `compile_error` with the log saying
   so;
@@ -201,7 +234,7 @@ writable places are `/work` and a small tmpfs at `/tmp`. The program copies
 the source folder into a fresh directory under `/tmp`, leaving `in/` as it
 was, and the compilers write everything they produce (object files, class
 files, `__pycache__`) there; it removes that directory before it exits. It
-writes `out/binary` and `outputs.json` under `/work`, and `outputs.json`
+writes `out/program` and `outputs.json` under `/work`, and `outputs.json`
 whole, under a temporary name first, so the harness never reads half a file.
 Links in the source folder are neither followed nor copied.
 
@@ -255,7 +288,7 @@ docker build -t primitive-compile:dev .
 mkdir -p work/in/1/source/lib
 printf 'from lib.twice import twice\nprint(twice(int(input())))\n' > work/in/1/source/main.py
 printf 'def twice(n):\n    return 2 * n\n' > work/in/1/source/lib/twice.py
-echo '{"schema_version": 5, "inputs": {"source": {"folder": "in/1/source"}, "language": "python", "entry": "main.py"}}' > work/inputs.json
+echo '{"schema_version": 6, "inputs": {"source": {"folder": "in/1/source"}, "language": "python", "entry": "main.py"}}' > work/inputs.json
 chmod -R a+rwX work
 docker run --rm --network=none --read-only --cap-drop=ALL \
   --security-opt=no-new-privileges --security-opt=seccomp=builtin \
@@ -276,12 +309,12 @@ two `uses:` lines and `runner-ref` together.
 
 ## Releasing
 
-Push a tag `v2.3.4` on `main`. The shared release workflow refuses a tag
+Push a tag `v3.0.1` on `main`. The shared release workflow refuses a tag
 whose commit is not on `main` and a tag that differs from the version in
-`pyproject.toml`. The tag's major is the version at the forge: `v2.3.4` is a
-release of `unicon/compile@v2`, so a change to the ports is a new major. It
+`pyproject.toml`. The tag's major is the version at the forge: `v3.0.1` is a
+release of `unicon/compile@v3`, so a change to the ports is a new major. It
 runs the same checks as CI, pushes the image as
-`ghcr.io/uniconhq/primitive-compile:v2.3.4`, and creates a GitHub release
+`ghcr.io/uniconhq/primitive-compile:v3.0.1`, and creates a GitHub release
 with `images.json`, which names the image by digest in the same shape as the
 runner's, and `primitive.yaml` attached, and the digest in the notes.
 `deploy/images.json` pins that digest, and bootstrap writes it into the

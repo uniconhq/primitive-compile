@@ -37,6 +37,47 @@ SOURCES = {
     ),
 }
 
+
+def notebook_of(*cells: str) -> str:
+    """A notebook of nbformat 4 whose code cells are `cells`, after a
+    markdown cell."""
+    document = {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {},
+        "cells": [
+            {"cell_type": "markdown", "metadata": {}, "source": "# Doubling"},
+            *(
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "execution_count": None,
+                    "outputs": [],
+                    "source": cell,
+                }
+                for cell in cells
+            ),
+        ],
+    }
+    return json.dumps(document)
+
+
+NOTEBOOK = ("double.ipynb", notebook_of("n = int(input())", "print(n * 2)"))
+"""A notebook that doubles the number it reads, for the image tests."""
+
+NOTEBOOK_FOLDER = (
+    {
+        "work/run.ipynb": notebook_of(
+            "from twice import twice", "print(twice(int(input())))"
+        ),
+        "work/twice.py": "def twice(n):\n    return 2 * n\n",
+        "other.ipynb": notebook_of("print('not this one')"),
+    },
+    "work/run.ipynb",
+)
+"""A notebook that imports the module beside it, named as the entry since
+the folder holds another."""
+
 FOLDERS: dict[str, tuple[dict[str, str], str | None]] = {
     "c": (
         {
@@ -186,5 +227,5 @@ def step_inputs(
     }
     if entry is not None:
         inputs["entry"] = entry
-    document = {"schema_version": 5, "inputs": inputs}
+    document = {"schema_version": 6, "inputs": inputs}
     (work / "inputs.json").write_text(json.dumps(document))

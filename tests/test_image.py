@@ -2,7 +2,7 @@
 
 Every language compiles a small program, from one file and from a folder of
 nested files, and the binary is then run from the same image the way
-sandbox-run runs it, to see that it works.
+exec runs it, to see that it works.
 """
 
 import json
@@ -14,6 +14,8 @@ import pytest
 from support import (
     BROKEN,
     FOLDERS,
+    NOTEBOOK,
+    NOTEBOOK_FOLDER,
     SOURCES,
     Check,
     RunImage,
@@ -25,12 +27,13 @@ from support import (
 pytestmark = pytest.mark.image
 
 LAUNCH = {
-    "c": (["--entrypoint", "/work/out/binary"], []),
-    "cpp": (["--entrypoint", "/work/out/binary"], []),
-    "python": (["--entrypoint", "python3"], ["-I", "-B", "/work/out/binary"]),
+    "c": (["--entrypoint", "/work/out/program"], []),
+    "cpp": (["--entrypoint", "/work/out/program"], []),
+    "python": (["--entrypoint", "python3"], ["-I", "-B", "/work/out/program"]),
+    "ipynb": (["--entrypoint", "python3"], ["-I", "-B", "/work/out/program"]),
     "java": (
         ["--entrypoint", "java"],
-        ["-XX:-UsePerfData", "-jar", "/work/out/binary"],
+        ["-XX:-UsePerfData", "-jar", "/work/out/program"],
     ),
 }
 
@@ -45,39 +48,39 @@ def run_binary(image: str, work: Path, language: str, stdin: str) -> str:
     ).stdout
 
 
-@pytest.mark.parametrize("language", ["python", "c", "cpp", "java"])
+@pytest.mark.parametrize("language", ["python", "c", "cpp", "java", "ipynb"])
 def test_each_language_compiles_to_a_binary_that_runs(
     tmp_path: Path, image: str, run_image: RunImage, check: Check, language: str
 ) -> None:
     """A good source gives `accepted`, a quiet log and a binary that works."""
-    name, text = SOURCES[language]
+    name, text = SOURCES[language] if language in SOURCES else NOTEBOOK
     step_inputs(tmp_path, {name: text}, language)
     check(json.loads((tmp_path / "inputs.json").read_text()), "inputs_file")
     result = run_image(tmp_path)
     check(result, "outputs_file")
     assert result["outputs"] == {
-        "binary": {"file": "out/binary"},
-        "compile_log": "",
+        "program": {"file": "out/program"},
+        "log": "",
         "outcome": "accepted",
     }
     assert run_binary(image, tmp_path, language, "21\n") == "42\n"
 
 
-@pytest.mark.parametrize("language", ["python", "c", "cpp", "java"])
+@pytest.mark.parametrize("language", ["python", "c", "cpp", "java", "ipynb"])
 def test_each_language_compiles_a_folder_to_a_binary_that_runs(
     tmp_path: Path, image: str, run_image: RunImage, check: Check, language: str
 ) -> None:
     """Nested sources compile together from the entry, named or found, and the
     binary works.
     """
-    files, entry = FOLDERS[language]
+    files, entry = FOLDERS[language] if language in FOLDERS else NOTEBOOK_FOLDER
     step_inputs(tmp_path, files, language, entry)
     check(json.loads((tmp_path / "inputs.json").read_text()), "inputs_file")
     result = run_image(tmp_path)
     check(result, "outputs_file")
     assert result["outputs"] == {
-        "binary": {"file": "out/binary"},
-        "compile_log": "",
+        "program": {"file": "out/program"},
+        "log": "",
         "outcome": "accepted",
     }
     assert run_binary(image, tmp_path, language, "21\n") == "42\n"
@@ -104,10 +107,10 @@ def test_a_folder_whose_entry_is_not_clear_is_a_compile_error(
     result = run_image(tmp_path)
     check(result, "outputs_file")
     assert result["outputs"]["outcome"] == "compile_error"
-    assert result["outputs"]["compile_log"].endswith(
+    assert result["outputs"]["log"].endswith(
         "; name the file to start from as the entry\n"
     )
-    assert "binary" not in result["outputs"]
+    assert "program" not in result["outputs"]
 
 
 @pytest.mark.parametrize("language", ["python", "c", "cpp", "java"])
@@ -120,9 +123,9 @@ def test_a_source_that_does_not_compile_is_a_compile_error(
     result = run_image(tmp_path)
     check(result, "outputs_file")
     assert result["outputs"]["outcome"] == "compile_error"
-    assert expected in result["outputs"]["compile_log"]
-    assert "binary" not in result["outputs"]
-    assert not (tmp_path / "out" / "binary").exists()
+    assert expected in result["outputs"]["log"]
+    assert "program" not in result["outputs"]
+    assert not (tmp_path / "out" / "program").exists()
 
 
 @pytest.mark.parametrize(
@@ -154,7 +157,7 @@ def test_sources_made_to_be_slow_to_read_are_a_compile_error(
     step_inputs(tmp_path, files, language)
     result = run_image(tmp_path)
     assert result["outputs"]["outcome"] == "compile_error"
-    assert line in result["outputs"]["compile_log"]
+    assert line in result["outputs"]["log"]
 
 
 def test_a_huge_compile_log_is_cut(tmp_path: Path, run_image: RunImage) -> None:
@@ -162,7 +165,7 @@ def test_a_huge_compile_log_is_cut(tmp_path: Path, run_image: RunImage) -> None:
     text = "".join(f"int f{n}(void) {{ return y{n}; }}\n" for n in range(3000))
     step_inputs(tmp_path, {"main.c": text}, "c")
     result = run_image(tmp_path)
-    log = result["outputs"]["compile_log"]
+    log = result["outputs"]["log"]
     assert result["outputs"]["outcome"] == "compile_error"
     assert "[compile log cut at 65536 bytes;" in log
     assert len(log.encode()) < 65536 + 200
@@ -221,7 +224,7 @@ def test_a_folder_too_large_to_copy_is_a_compile_error(
     result = run_image(tmp_path)
     check(result, "outputs_file")
     assert result["outputs"] == {
-        "compile_log": "the source folder could not be copied to compile it:"
+        "log": "the source folder could not be copied to compile it:"
         " No space left on device\n",
         "outcome": "compile_error",
     }

@@ -1,7 +1,7 @@
 [project]
 name = "primitive-compile"
 version = "2.2.0"
-description = "The Unicon compile primitive: a folder of sources to one binary and a compile log."
+description = "The Unicon compile primitive: a folder of sources or a notebook to one program and a log."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

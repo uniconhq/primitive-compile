@@ -1,20 +1,20 @@
 # The compile primitive, ghcr.io/uniconhq/primitive-compile. One container per
 # compile step: it reads /work/inputs.json and the source under /work/in/, and
-# writes /work/outputs.json and the binary under /work/out/.
+# writes /work/outputs.json and the program under /work/out/.
 
 # Pinned by digest so a release rebuilds from the same base. python:3.14-slim
 # (Debian 13), pulled 2026-09-13, the same pin as the runner's images and the
-# sandbox-run primitive, which runs what this image builds with the same Python
+# exec primitive, which runs what this image builds with the same Python
 # and the same Java. Change it in both primitives together, from
 # `docker image inspect python:3.14-slim --format '{{index .RepoDigests 0}}'`.
 FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
 
 LABEL org.opencontainers.image.title="primitive-compile" \
-      org.opencontainers.image.description="The Unicon compile primitive: a folder of sources to one binary." \
+      org.opencontainers.image.description="The Unicon compile primitive: a folder of sources or a notebook to one program." \
       org.opencontainers.image.source="https://github.com/uniconhq/primitive-compile" \
       org.opencontainers.image.licenses="MIT"
 
-# gcc and g++ link statically, so the binary runs in the sandbox-run image,
+# gcc and g++ link statically, so the program runs in the exec image,
 # which has no C library headers or compilers. The JDK's post-install scripts
 # expect the man directory the slim image leaves out.
 RUN mkdir -p /usr/share/man/man1 \
