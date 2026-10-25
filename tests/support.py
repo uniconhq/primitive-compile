@@ -3,8 +3,11 @@
 import ast
 import inspect
 import json
+import os
+import subprocess
 import textwrap
 from collections.abc import Callable
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 NAME = "primitive-compile"
 SIBLING_SCHEMA = ROOT.parent / "runner" / "schemas" / "primitive.schema.json"
+SIBLING_RUNNER = ROOT.parent / "runner"
 
 RunImage = Callable[..., dict[str, Any]]
 Check = Callable[[dict[str, Any], str], None]
@@ -36,6 +40,47 @@ SOURCES = {
         "    System.out.println(new Scanner(System.in).nextInt() * 2);\n  }\n}\n",
     ),
 }
+
+
+def notebook_of(*cells: str) -> str:
+    """A notebook of nbformat 4 whose code cells are `cells`, after a
+    markdown cell."""
+    document = {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {},
+        "cells": [
+            {"cell_type": "markdown", "metadata": {}, "source": "# Doubling"},
+            *(
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "execution_count": None,
+                    "outputs": [],
+                    "source": cell,
+                }
+                for cell in cells
+            ),
+        ],
+    }
+    return json.dumps(document)
+
+
+NOTEBOOK = ("double.ipynb", notebook_of("n = int(input())", "print(n * 2)"))
+"""A notebook that doubles the number it reads, for the image tests."""
+
+NOTEBOOK_FOLDER = (
+    {
+        "work/run.ipynb": notebook_of(
+            "from twice import twice", "print(twice(int(input())))"
+        ),
+        "work/twice.py": "def twice(n):\n    return 2 * n\n",
+        "other.ipynb": notebook_of("print('not this one')"),
+    },
+    "work/run.ipynb",
+)
+"""A notebook that imports the module beside it, named as the entry since
+the folder holds another."""
 
 FOLDERS: dict[str, tuple[dict[str, str], str | None]] = {
     "c": (
@@ -186,5 +231,23 @@ def step_inputs(
     }
     if entry is not None:
         inputs["entry"] = entry
-    document = {"schema_version": 5, "inputs": inputs}
+    document = {"schema_version": 6, "inputs": inputs}
     (work / "inputs.json").write_text(json.dumps(document))
+
+
+@cache
+def base_build_args() -> tuple[str, ...]:
+    """The `docker build` arguments naming the base image this repo's image
+    builds on: `BASE_IMAGE`, or primitive-base built from a runner checkout
+    beside this one, or none, which leaves the Dockerfile's own, the runner
+    release's."""
+    named = os.environ.get("BASE_IMAGE")
+    if not named:
+        dockerfile = SIBLING_RUNNER / "images" / "primitive-base" / "Dockerfile"
+        if not dockerfile.is_file():
+            return ()
+        named = "primitive-base:test"
+        command = ["docker", "build", "--quiet", "--tag", named]
+        command += ["--file", str(dockerfile), str(SIBLING_RUNNER)]
+        subprocess.run(command, check=True, capture_output=True)
+    return ("--build-arg", f"BASE_IMAGE={named}")

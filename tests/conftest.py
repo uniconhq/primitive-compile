@@ -8,7 +8,7 @@ and pids limits, one CPU, a small noexec tmpfs at /tmp and the working
 directory at /work. They are skipped when Docker is not reachable.
 
 The contract checks use `primitive.schema.json` from `PRIMITIVE_SCHEMA`, or
-from a runner checkout beside this one when it is the version 5 contract.
+from a runner checkout beside this one when it has the version 6 contract.
 
 The in-process tests import the program, which needs Linux, so elsewhere only
 the image tests are collected. The declaration is checked by the runner's
@@ -33,6 +33,7 @@ from support import (
     SIBLING_SCHEMA,
     Check,
     RunImage,
+    base_build_args,
     declaration,
     open_up,
     sandbox_flags,
@@ -52,7 +53,8 @@ def image() -> str:
     if named:
         return named
     tag = f"{NAME}:test"
-    subprocess.run(["docker", "build", "--quiet", "--tag", tag, str(ROOT)], check=True)
+    command = ["docker", "build", "--quiet", *base_build_args(), "--tag", tag]
+    subprocess.run([*command, str(ROOT)], check=True)
     return tag
 
 
@@ -76,15 +78,16 @@ def run_image(image: str) -> RunImage:
 
 @pytest.fixture(scope="session")
 def schema() -> dict[str, Any]:
-    """The runner's primitive.schema.json at contract version 5."""
+    """The runner's primitive.schema.json, when it has contract version 6."""
     named = os.environ.get("PRIMITIVE_SCHEMA")
     path = Path(named) if named else SIBLING_SCHEMA
     if not path.is_file():
         pytest.skip("no primitive.schema.json; set PRIMITIVE_SCHEMA")
     document: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     inputs_file = document.get("$defs", {}).get("inputs_file", {})
-    if inputs_file.get("properties", {}).get("schema_version", {}).get("const") != 5:
-        pytest.skip(f"{path} is not the version 5 contract")
+    version = inputs_file.get("properties", {}).get("schema_version", {})
+    if 6 not in version.get("enum", [version.get("const")]):
+        pytest.skip(f"{path} has no version 6 contract")
     return document
 
 

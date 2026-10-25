@@ -1,5 +1,5 @@
 #!/usr/local/bin/python3 -I
-"""The compile primitive: a folder of sources in, one binary and a compile log out.
+"""The compile primitive: a folder of sources in, one program and a log out.
 
 The harness mounts a working directory at `/work` (or the directory named by
 the first argument) holding `inputs.json` and the source folder under `in/`.
@@ -13,12 +13,14 @@ contestant's folder causes, such as naming an entry that is not there or
 making a compiler run out of time. `error` in `outputs.json` is kept for the
 cases where the primitive could not work at all, such as a missing input.
 
-The binary is one file the sandbox-run primitive runs: a statically linked
-executable for C and C++, a Python zip application for Python and a runnable
+The program is one file the exec primitive runs: a statically linked
+executable for C and C++, a Python zip application for Python and for a
+notebook, whose code cells are joined into one Python file, and a runnable
 jar for Java (see the README).
 """
 
 import errno
+import io
 import json
 import os
 import re
@@ -30,19 +32,27 @@ import subprocess
 import sys
 import tempfile
 import time
+import tokenize
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import FrameType
 
-SCHEMA_VERSION = 5
-LANGUAGES = ("c", "cpp", "java", "python")
-LANGUAGE_NAMES = {"c": "C", "cpp": "C++", "java": "Java", "python": "Python"}
+SCHEMA_VERSION = 6
+LANGUAGES = ("c", "cpp", "java", "python", "ipynb")
+LANGUAGE_NAMES = {
+    "c": "C",
+    "cpp": "C++",
+    "java": "Java",
+    "python": "Python",
+    "ipynb": "notebook",
+}
 EXTENSIONS = {
     "c": (".c",),
     "cpp": (".cpp", ".cc", ".cxx"),
     "java": (".java",),
     "python": (".py",),
+    "ipynb": (".ipynb",),
 }
 """The files of a folder that are compiled as the language's sources."""
 MAIN_DESCRIPTIONS = {
@@ -57,8 +67,8 @@ FOLDER_LIMIT = 1000
 NAMES_SHOWN = 10
 LOG_LIMIT = 64 * 1024
 BINARY_LIMIT = 32 * 1024 * 1024
-TOO_LARGE = "the binary would be larger than 32 MB\n"
-"""What the log ends with when the binary is over `BINARY_LIMIT`: the zip
+TOO_LARGE = "the program would be larger than 32 MB\n"
+"""What the log ends with when the program is over `BINARY_LIMIT`: the zip
 application and the jar are written by this program, which a compiler's
 file-size limit does not hold, so their size is checked here."""
 COMPILE_SECONDS = 30
@@ -135,6 +145,10 @@ C_PARAMETERS_LIMIT = 2000
 C_AFTER_PARAMETERS_LIMIT = 200
 """How far a C or C++ `main(` may be from the `)` that closes its parameters,
 and that `)` from the `{` of its body, for the file to count as defining main."""
+NOTEBOOK_FORMAT = 4
+MAGIC_STARTS = ("%", "!")
+"""What starts a line IPython reads as a magic or a shell command, which no
+Python runs: there is no IPython when a notebook's program runs."""
 PYTHON_MAIN = re.compile(
     r"^if\s+(?:__name__\s*==\s*(['\"])__main__\1|(['\"])__main__\2\s*==\s*__name__)"
     r"\s*:",
@@ -257,20 +271,20 @@ def input_folder(root: Path, inputs: dict[str, object], name: str) -> Path:
 def compile_source(
     root: Path, folder: Path, language: str, entry: str | None
 ) -> dict[str, object]:
-    """Compile `folder` into `out/binary` and return the outputs.
+    """Compile `folder` into `out/program` and return the outputs.
 
     Everything the compilers write goes to a fresh directory under the
     temporary directory, removed afterwards, except the binary itself.
     """
     out = root / "out"
     out.mkdir(exist_ok=True)
-    binary = out / "binary"
+    binary = out / "program"
     binary.unlink(missing_ok=True)
     build = Path(tempfile.mkdtemp(prefix="compile-"))
     try:
         source = build / "source"
         program = prepare_in_time(folder, source, language, entry)
-        if language == "python":
+        if language in ("python", "ipynb"):
             tool = compile_python(program, source, binary)
         elif language == "java":
             tool = compile_java(program, source, build, binary)
@@ -284,12 +298,12 @@ def compile_source(
         tool = Tool(1, tool.log + TOO_LARGE)
     if tool.ok and binary.is_file():
         return {
-            "binary": {"file": "out/binary"},
-            "compile_log": tool.log,
+            "program": {"file": "out/program"},
+            "log": tool.log,
             "outcome": "accepted",
         }
     binary.unlink(missing_ok=True)
-    return {"compile_log": tool.log, "outcome": "compile_error"}
+    return {"log": tool.log, "outcome": "compile_error"}
 
 
 def prepare_in_time(
@@ -326,7 +340,30 @@ def prepare(folder: Path, source: Path, language: str, entry: str | None) -> Pro
     the one named, or else the one source, or else the one source that holds
     main (see the README). For C and C++ a source other than the entry that
     holds main is left out; for Java the entry gives the class the jar runs.
+    A notebook entry is replaced in the copy by its code cells, joined into
+    one Python file under the notebook's name, and checked with the folder's
+    Python files.
     """
+    program = prepare_folder(folder, source, language, entry)
+    if language != "ipynb":
+        return program
+    notebook = source / program.entry
+    try:
+        code = notebook_code(read_notebook(notebook, program.entry), program.entry)
+        notebook.write_text(code, encoding="utf-8")
+    except OSError as error:
+        raise CompileError(
+            f"the notebook could not be read to compile it: {error.strerror}"
+        ) from None
+    modules = [path for path in program.files if path.endswith(".py")]
+    return Program(program.files, [program.entry, *modules], program.entry)
+
+
+def prepare_folder(
+    folder: Path, source: Path, language: str, entry: str | None
+) -> Program:
+    """Copy the source folder to `source` and work out what to compile, as
+    `prepare` says, a notebook still as it was written."""
     files = folder_files(folder)
     if entry is not None:
         entry = entry_path(entry, files)
@@ -413,6 +450,11 @@ def find_entry(folder: Path, sources: list[str], language: str) -> str:
         )
     if len(sources) == 1:
         return sources[0]
+    if language == "ipynb":
+        raise CompileError(
+            f"the entry is not clear: the source folder holds {len(sources)}"
+            " notebooks; name the one to run as the entry"
+        )
     holders = [path for path in sources if holds_main(folder / path, language)]
     if len(holders) == 1:
         return holders[0]
@@ -522,6 +564,103 @@ def code_only(text: str, language: str) -> str:
     return "".join(kept)
 
 
+def read_notebook(path: Path, name: str) -> str:
+    """A notebook's text, which JSON has as UTF-8: one that is not, or that
+    is over `BINARY_LIMIT` and so could not make a program, is a compile
+    error, before it is parsed."""
+    if path.stat().st_size > BINARY_LIMIT:
+        raise CompileError(f"the notebook {name} is larger than 32 MB")
+    try:
+        return path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        raise CompileError(f"the notebook {name} is not UTF-8 text") from None
+
+
+def notebook_code(text: str, name: str) -> str:
+    """A notebook's code cells, in order, as one Python file, each behind a
+    line naming its cell, so a traceback's line can be found in the notebook.
+    The file's first line says it is UTF-8, as it is written, so a coding
+    line in the first cell, now its second line, does not change how
+    Python reads it.
+
+    The notebook is read as nbformat 4 JSON; its markdown and raw cells and
+    every output it holds are passed over. A notebook that is not one, or a
+    code cell with a line IPython alone would run, a magic or a shell
+    command, is a compile error naming the cell, counted from 1 among all its
+    cells as the notebook shows them.
+    """
+    try:
+        document = json.loads(text.removeprefix("\ufeff"))
+    except ValueError, RecursionError:
+        raise CompileError(f"the notebook {name} is not valid JSON") from None
+    cells = document.get("cells") if isinstance(document, dict) else None
+    if not isinstance(cells, list) or document.get("nbformat") != NOTEBOOK_FORMAT:
+        raise CompileError(
+            f"the notebook {name} is not a notebook of format {NOTEBOOK_FORMAT}"
+        )
+    parts = ["# coding: utf-8\n"]
+    for number, cell in enumerate(cells, 1):
+        if not isinstance(cell, dict) or cell.get("cell_type") != "code":
+            continue
+        code = cell_source(cell.get("source"), name, number)
+        magic = magic_line(code)
+        if magic is not None:
+            raise CompileError(
+                f"cell {number} of the notebook {name} runs {magic[:80]!r}, which"
+                " only IPython runs; there is none when the program runs"
+            )
+        parts.append(f"# cell {number}\n{code}\n")
+    return "".join(parts)
+
+
+def cell_source(source: object, name: str, number: int) -> str:
+    """A code cell's text: a string, or a list of strings joined as written,
+    and Unicode throughout: JSON can carry half of a surrogate pair, which
+    no Python file holds."""
+    if isinstance(source, str):
+        text = source
+    elif isinstance(source, list) and all(isinstance(line, str) for line in source):
+        text = "".join(source)
+    else:
+        raise CompileError(f"cell {number} of the notebook {name} has no source text")
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise CompileError(
+            f"cell {number} of the notebook {name} holds text that is not Unicode"
+        ) from None
+    return text
+
+
+def magic_line(code: str) -> str | None:
+    """The first line of a cell that starts a statement with `%` or `!`, as
+    a magic (`%pip`, `%%time`) or a shell command (`!ls`) does, or None.
+
+    The cell is read as Python tokens, so a `%` that continues an expression
+    or sits inside a string is not one. A cell Python cannot read as tokens
+    is left to the compile, which says why.
+    """
+    starting = True
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(code).readline):
+            if token.type == tokenize.NEWLINE:
+                starting = True
+            elif token.type in (
+                tokenize.NL,
+                tokenize.COMMENT,
+                tokenize.INDENT,
+                tokenize.DEDENT,
+            ):
+                continue
+            elif starting:
+                if token.string in MAGIC_STARTS:
+                    return token.line.strip()
+                starting = False
+    except tokenize.TokenError, SyntaxError:
+        return None
+    return None
+
+
 def single_file(path: Path, language: str) -> tuple[str, str | None]:
     """The name the only file of a folder is compiled under, and for Java the
     class the jar runs.
@@ -578,7 +717,7 @@ def compile_python(program: Program, source: Path, binary: Path) -> Tool:
     """Check every source with py_compile and pack the folder as a zip application.
 
     The archive holds the folder under `source/` and a `__main__.py` that runs
-    the entry, behind a shebang line, so the interpreter in the sandbox-run
+    the entry, behind a shebang line, so the interpreter in the exec
     image runs it as a script.
     """
     tool = run_tool(
