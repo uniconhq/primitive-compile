@@ -33,6 +33,7 @@ from support import (
     SIBLING_SCHEMA,
     Check,
     RunImage,
+    base_build_args,
     declaration,
     open_up,
     sandbox_flags,
@@ -52,7 +53,8 @@ def image() -> str:
     if named:
         return named
     tag = f"{NAME}:test"
-    subprocess.run(["docker", "build", "--quiet", "--tag", tag, str(ROOT)], check=True)
+    command = ["docker", "build", "--quiet", *base_build_args(), "--tag", tag]
+    subprocess.run([*command, str(ROOT)], check=True)
     return tag
 
 

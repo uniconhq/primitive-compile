@@ -188,7 +188,8 @@ the files beside it as it would from the folder.
 
 Static linking means a native binary needs nothing from the image it runs
 in. A Python or Java binary needs the interpreter it was checked against, so
-both images are built from the same pinned `python:3.14-slim` base and
+both images build on the runner's `primitive-base`, the same pinned
+`python:3.14-slim`, and
 install the same Debian OpenJDK 21 packages: the JDK in compile, the runtime
 in exec. A change to any of the three formats, or to either image's
 Python or Java, is made in both repos together.
@@ -241,8 +242,8 @@ Links in the source folder are neither followed nor copied.
 ## Layout
 
 ```
-Dockerfile                  the image: python:3.14-slim, gcc, g++, OpenJDK 21
-src/compiler.py             the program, installed as /usr/local/bin/compile, the image's entrypoint
+Dockerfile                  the image: primitive-base, gcc, g++, OpenJDK 21
+src/compiler.py             the program, installed as /usr/local/bin/compile, the image's command
 primitive.yaml              the declaration, without the image line
 tests/                      unit tests, and image tests that run it on Docker
 ```
@@ -281,10 +282,17 @@ collected. Without Docker the image tests are skipped. They use
 `inputs.json` and `outputs.json` the tests see read the schema from
 `PRIMITIVE_SCHEMA`, or from a `runner` checkout beside this one.
 
+The image builds on the runner's `primitive-base` (`ARG BASE_IMAGE`), whose
+step wrapper is the entrypoint and runs `compile` as the image's command in
+a grading step, and runs it in its own place anywhere else. The Dockerfile
+names the runner release's image; the image tests build one from a `runner`
+checkout beside this one, or take `BASE_IMAGE`.
+
 To run one compile by hand:
 
 ```
-docker build -t primitive-compile:dev .
+docker build -t primitive-base:test -f ../runner/images/primitive-base/Dockerfile ../runner
+docker build -t primitive-compile:dev --build-arg BASE_IMAGE=primitive-base:test .
 mkdir -p work/in/1/source/lib
 printf 'from lib.twice import twice\nprint(twice(int(input())))\n' > work/in/1/source/main.py
 printf 'def twice(n):\n    return 2 * n\n' > work/in/1/source/lib/twice.py

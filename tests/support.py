@@ -3,8 +3,11 @@
 import ast
 import inspect
 import json
+import os
+import subprocess
 import textwrap
 from collections.abc import Callable
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 NAME = "primitive-compile"
 SIBLING_SCHEMA = ROOT.parent / "runner" / "schemas" / "primitive.schema.json"
+SIBLING_RUNNER = ROOT.parent / "runner"
 
 RunImage = Callable[..., dict[str, Any]]
 Check = Callable[[dict[str, Any], str], None]
@@ -229,3 +233,21 @@ def step_inputs(
         inputs["entry"] = entry
     document = {"schema_version": 6, "inputs": inputs}
     (work / "inputs.json").write_text(json.dumps(document))
+
+
+@cache
+def base_build_args() -> tuple[str, ...]:
+    """The `docker build` arguments naming the base image this repo's image
+    builds on: `BASE_IMAGE`, or primitive-base built from a runner checkout
+    beside this one, or none, which leaves the Dockerfile's own, the runner
+    release's."""
+    named = os.environ.get("BASE_IMAGE")
+    if not named:
+        dockerfile = SIBLING_RUNNER / "images" / "primitive-base" / "Dockerfile"
+        if not dockerfile.is_file():
+            return ()
+        named = "primitive-base:test"
+        command = ["docker", "build", "--quiet", "--tag", named]
+        command += ["--file", str(dockerfile), str(SIBLING_RUNNER)]
+        subprocess.run(command, check=True, capture_output=True)
+    return ("--build-arg", f"BASE_IMAGE={named}")

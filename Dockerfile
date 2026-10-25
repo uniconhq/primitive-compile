@@ -2,12 +2,15 @@
 # compile step: it reads /work/inputs.json and the source under /work/in/, and
 # writes /work/outputs.json and the program under /work/out/.
 
-# Pinned by digest so a release rebuilds from the same base. python:3.14-slim
-# (Debian 13), pulled 2026-09-13, the same pin as the runner's images and the
-# exec primitive, which runs what this image builds with the same Python
-# and the same Java. Change it in both primitives together, from
-# `docker image inspect python:3.14-slim --format '{{index .RepoDigests 0}}'`.
-FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
+# The image builds on the primitives' base, the runner's
+# ghcr.io/uniconhq/primitive-base: the same python:3.14-slim, with the step
+# wrapper as its entrypoint, which runs this image's command in a grading
+# step and runs it in its own place anywhere else. BASE_IMAGE names the
+# runner release's image; a build against a runner checkout passes the one
+# built from it, as the tests and the shared CI do. exec and interact build
+# on the same base, so they run what this image builds with its Python.
+ARG BASE_IMAGE=ghcr.io/uniconhq/primitive-base:v0.10.0
+FROM ${BASE_IMAGE}
 
 LABEL org.opencontainers.image.title="primitive-compile" \
       org.opencontainers.image.description="The Unicon compile primitive: a folder of sources or a notebook to one program." \
@@ -29,4 +32,4 @@ COPY --chmod=0755 src/compiler.py /usr/local/bin/compile
 # /work and /tmp as the only writable places. The program writes nowhere else.
 USER 65532:65532
 WORKDIR /work
-ENTRYPOINT ["/usr/local/bin/compile"]
+CMD ["/usr/local/bin/compile"]
