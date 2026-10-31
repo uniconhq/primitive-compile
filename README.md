@@ -1,5 +1,15 @@
 # primitive-compile
 
+**Retired.** `unicon/exec@v2` compiles a program's source itself, in an
+isolate box of its own, and keeps compiled programs in the machine's cache,
+so a workflow no longer has a compile step before its exec step. Every
+workflow and task moved to exec@v2, and neither `unicon/compile@v3` nor
+`unicon/compile@v2` is kept at the forge. The compiling logic, languages,
+entry rules and flags below live on in
+[primitive-exec](https://github.com/uniconhq/primitive-exec), under
+`src/exec/compile/`, and its README's "Compiling" section is the one kept up
+to date. This repo stays for its history; nothing builds or pulls its image.
+
 The `unicon/compile` primitive, at the forge `unicon/compile@v3`: it turns a
 folder of source files, or a notebook, into one program that the
 `unicon/exec` primitive can run, and gives back the compiler's log. The same
